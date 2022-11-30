@@ -27,7 +27,7 @@ task:
       env:
         GOLANGCI_ARGS: "--disable=cyclop,dupl,gci,godox,goerr113,gomnd,gosimple,ifshort,lll,nlreturn,nosnakecase,revive,varnamelen,wrapcheck"
     - name: Go Lint
-        env:
+      env:
         GOLANGCI_ARGS: ""
       allow_failures: true
   always:
