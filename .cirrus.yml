@@ -15,10 +15,7 @@ task:
         cpu:  1
         memory: 1G
       package_install_script:
-        - apt update 
-        - apt install -y snapd
-        - apt install sudo
-        - sudo snap install go --classic
+        - apt update && apt upgrade
         - apt install -y golang-go
         - apt install -y git
       env:
