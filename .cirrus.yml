@@ -7,27 +7,3 @@ task:
   install_script: dnf install -y ShellCheck
   lint_script: bash testdata/shellcheck.bash
 
-task:
-  name: "Ping Program $CI_DISTRO"
-  matrix:
-    - container :
-        image: debian:latest
-        cpu:  1
-        memory: 1G
-      package_install_script:
-        - apt update 
-        - apt install -y golang-go
-        - apt install -y git
-      env:
-        CI_DISTRO: debian
-    - container:
-        image: fedora:latest
-        cpu: 1
-        memory: 1G
-      package_install_script:
-        - dnf install -y golang-go
-        - dnf install -y git
-      env:
-        CI_DISTRO: fedora
-  test_script:
-    - testdata/ping.bash
