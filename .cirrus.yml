@@ -15,7 +15,7 @@ task:
         cpu:  1
         memory: 1G
       package_install_script:
-        - apt update && apt upgrade
+        - apt update 
         - apt install -y golang-go
         - apt install -y git
       env:
