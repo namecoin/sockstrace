@@ -17,7 +17,7 @@ task:
       package_install_script:
         - apt update
         - apt install -y snapd
-        - snap install go --classic
+        - sudo snap install go --classic
         - apt install -y golang-go
         - apt install -y git
       env:
