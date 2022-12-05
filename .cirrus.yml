@@ -15,10 +15,10 @@ task:
         cpu:  1
         memory: 1G
       package_install_script:
-        - apt update
-        - apt upgrade
-        - apt install -y golang-go
-        - apt install -y git
+        - apt-get update
+        - apt-
+        - apt-get install -y golang-go
+        - apt-get install -y git
       env:
         CI_DISTRO: debian
     - container:
