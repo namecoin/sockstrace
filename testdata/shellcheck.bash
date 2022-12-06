@@ -11,12 +11,3 @@ for I in $ALL_SHELL
 do
     shellcheck "${I}"
 done
-
-task:
-  name: ShellCheck
-  container:
-    image: fedora:latest
-    cpu: 1
-    memory: 1G
-  install_script: dnf install -y ShellCheck
-  lint_script: bash testdata/shellcheck.bash
