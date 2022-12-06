@@ -2,8 +2,7 @@ package main
 
 import (
 	"encoding/hex"
-	"fmt"
-	"github.com/u-root/u-root/pkg/strace"
+	"f	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
 	"os/exec"
 	"strings"
@@ -46,7 +45,7 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	return nil
 }
 
-func GetIPAndPort(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
+func GetIpAndPort(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
 	if len(data) == 0 {
 		return
 	}
@@ -85,4 +84,10 @@ func GetIPAndPort(data string, t strace.Task, args strace.SyscallArguments) (ip 
 	}
 	port = fulladdr.Port
 	return ip, port
+etaddr)
+	if err != nil {
+		panic(err)
+	}
+	port = fulladdr.Port
+	return ip, port	
 }
