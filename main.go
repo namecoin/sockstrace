@@ -87,6 +87,7 @@ func GetIpAndPortdata (data string, t strace.Task, args strace.SyscallArguments)
 	if err != nil {
 		panic(err)
 	}
+	
 	port = fulladdr.Port
 	return ip, port	
 }
