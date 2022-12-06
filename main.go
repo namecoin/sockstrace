@@ -3,10 +3,11 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
-	"github.com/u-root/u-root/pkg/strace"
-	"golang.org/x/sys/unix"
 	"os/exec"
 	"strings"
+	
+	"github.com/u-root/u-root/pkg/strace"
+	"golang.org/x/sys/unix"
 )
 
 func main() {
