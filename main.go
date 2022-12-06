@@ -2,10 +2,11 @@ package main
 
 import (
 	"encoding/hex"
-	"f	"github.com/u-root/u-root/pkg/strace"
-	"golang.org/x/sys/unix"
+	"fmt"
 	"os/exec"
 	"strings"
+	"golang.org/x/sys/unix"
+	"github.com/u-root/u-root/pkg/strace"
 )
 
 func main() {
@@ -14,12 +15,13 @@ func main() {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
-			ip, port := GetIPAndPort(data, t, record.Syscall.Args)
+			ip, port := GGetIpAndPortdata, t, record.Syscall.Args)
 			if port == 0 {
-				fmt.Printf("IP : %v\n", ip) //nolint
+				fmt.Printf("IP : %v\n", ip) 
 			} else {
-				fmt.Printf("IP : %v Port : %v\n", ip, port) //nolint
-			}
+				fmt.Printf("IP : %v Port : %v\n", ip, port) 
+			}		
+			return nil	
 		}
 		return SocketSysCalls(record)
 	}); err != nil {
@@ -40,12 +42,11 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	if _, err := socketfunctions[SyscallName]; !err {
 		return nil
 	}
-	fmt.Printf("Detected a Socket System Call: %v\n", SyscallName) //nolint
-
+	fmt.Printf("Detected a Socket System Call: %v\n", SyscallName) 
 	return nil
 }
 
-func GetIpAndPort(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
+func GetIpAndPortdata string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
 	if len(data) == 0 {
 		return
 	}
@@ -60,7 +61,6 @@ func GetIpAndPort(data string, t strace.Task, args strace.SyscallArguments) (ip 
 		} else {
 			ip = data[s1+5 : s1+s3]
 		}
-
 		ip = strings.ReplaceAll(ip, `"`, "")
 		ip = strings.ReplaceAll(ip, ` `, "")
 		if ip[:2] == "0x" {
@@ -79,12 +79,6 @@ func GetIpAndPort(data string, t strace.Task, args strace.SyscallArguments) (ip 
 		panic(err)
 	}
 	fulladdr, err := strace.GetAddress(t, socketaddr)
-	if err != nil {
-		panic(err)
-	}
-	port = fulladdr.Port
-	return ip, port
-etaddr)
 	if err != nil {
 		panic(err)
 	}
