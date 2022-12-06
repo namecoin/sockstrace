@@ -17,9 +17,9 @@ func main() {
 			// Detect the IP and Port.
 			ip, port := GetIpAndPortdata(data, t, record.Syscall.Args)
 			if port == 0 {
-				fmt.Printf("IP : %v\n", ip) 
+				fmt.Printf("IP : %v\n", ip) //nolint
 			} else {
-				fmt.Printf("IP : %v Port : %v\n", ip, port) 
+				fmt.Printf("IP : %v Port : %v\n", ip, port) //nolint
 			}		
 			return nil	
 		}
@@ -42,7 +42,8 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	if _, err := socketfunctions[SyscallName]; !err {
 		return nil
 	}
-	fmt.Printf("Detected a Socket System Call: %v\n", SyscallName) 
+	fmt.Printf("Detected a Socket System Call: %v\n", SyscallName) //nolint
+
 	return nil
 }
 
@@ -61,8 +62,10 @@ func GetIpAndPortdata (data string, t strace.Task, args strace.SyscallArguments)
 		} else {
 			ip = data[s1+5 : s1+s3]
 		}
+
 		ip = strings.ReplaceAll(ip, `"`, "")
 		ip = strings.ReplaceAll(ip, ` `, "")
+
 		if ip[:2] == "0x" {
 			ip = ip[2:]
 			// Decode the Address
@@ -75,9 +78,11 @@ func GetIpAndPortdata (data string, t strace.Task, args strace.SyscallArguments)
 	addrlen := args[2].Uint()
 
 	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
+
 	if err != nil {
 		panic(err)
 	}
+
 	fulladdr, err := strace.GetAddress(t, socketaddr)
 	if err != nil {
 		panic(err)
