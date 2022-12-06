@@ -47,7 +47,7 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	return nil
 }
 
-func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
+func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) { //nolint
 	if len(data) == 0 {
 		return
 	}
