@@ -3,10 +3,10 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
-	"github.com/u-root/u-root/pkg/strace"
-	"golang.org/x/sys/unix"
 	"os/exec"
 	"strings"
+	"golang.org/x/sys/unix"
+	"github.com/u-root/u-root/pkg/strace"
 )
 
 func main() {
@@ -20,8 +20,8 @@ func main() {
 				fmt.Printf("IP : %v\n", ip) //nolint
 			} else {
 				fmt.Printf("IP : %v Port : %v\n", ip, port) //nolint
-			}
-			return nil
+			}		
+			return nil	
 		}
 		return SocketSysCalls(record)
 	}); err != nil {
@@ -47,7 +47,7 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	return nil
 }
 
-func GetIpAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
+func GetIpAndPortdata (data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
 	if len(data) == 0 {
 		return
 	}
@@ -87,7 +87,7 @@ func GetIpAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 	if err != nil {
 		panic(err)
 	}
-
+	
 	port = fulladdr.Port
-	return ip, port
+	return ip, port	
 }
