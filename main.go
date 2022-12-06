@@ -15,7 +15,7 @@ func main() {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
-			ip, port := GGetIpAndPortdata, t, record.Syscall.Args)
+			ip, port := GetIpAndPortdata(t, record.Syscall.Args)
 			if port == 0 {
 				fmt.Printf("IP : %v\n", ip) 
 			} else {
@@ -46,7 +46,7 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	return nil
 }
 
-func GetIpAndPortdata string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
+func GetIpAndPortdata (data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) {
 	if len(data) == 0 {
 		return
 	}
