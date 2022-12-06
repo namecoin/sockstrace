@@ -15,7 +15,7 @@ func main() {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
-			ip, port := GetIpAndPortdata(t, record.Syscall.Args)
+			ip, port := GetIpAndPortdata(data, t, record.Syscall.Args)
 			if port == 0 {
 				fmt.Printf("IP : %v\n", ip) 
 			} else {
