@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	
+
 	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
 )
@@ -33,9 +33,11 @@ func main() {
 // SocketSysCalls checks if a syscall is a socket syscall.
 func SocketSysCalls(r *strace.TraceRecord) error {
 	// Socket call functions from Ubuntu Manuals (https://manpages.ubuntu.com/manpages/bionic/man2/socketcall.2.html)
-	socketfunctions := map[string]struct{}{"socket": {}, "bind": {}, "connect": {}, "listen": {}, "accept": {}, "getsockname": {},
+	socketfunctions := map[string]struct{}{
+		"socket": {}, "bind": {}, "connect": {}, "listen": {}, "accept": {}, "getsockname": {},
 		"getpeername": {}, "socketpair": {}, "send": {}, "recv": {}, "sendto": {}, "recvfrom": {}, "shutdown": {}, "setsockopt": {},
-		"getsockopt": {}, "sendmsg": {}, "recvmsg": {}, "accept4": {}, "recvmmsg": {}, "sendmmsg": {}}
+		"getsockopt": {}, "sendmsg": {}, "recvmsg": {}, "accept4": {}, "recvmmsg": {}, "sendmmsg": {},
+	}
 
 	// Get the name of the Socket System Call
 	SyscallName, _ := strace.ByNumber(uintptr(r.Syscall.Sysno))
@@ -79,7 +81,6 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 	addrlen := args[2].Uint()
 
 	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
-
 	if err != nil {
 		panic(err)
 	}
