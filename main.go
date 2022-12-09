@@ -35,7 +35,9 @@ func main() {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
 			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
-			if port == 0 {
+			if ip == "" {
+				fmt.Printf("No Ip Address") //nolint
+			} else if port == 0 {
 				fmt.Printf("IP : %v\n", ip) //nolint
 			} else {
 				fmt.Printf("IP : %v Port : %v\n", ip, port) //nolint
@@ -100,12 +102,12 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 
 	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
 	if err != nil {
-		panic(err)
+		return "", 0
 	}
 
 	fulladdr, err := strace.GetAddress(t, socketaddr)
 	if err != nil {
-		panic(err)
+		return "", 0
 	}
 
 	port = fulladdr.Port
