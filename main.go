@@ -36,8 +36,8 @@ func main() {
 			// Detect the IP and Port.
 			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
 			switch {
-			case ip == "": //nolint
-				fmt.Printf("No Ip Address") //nolint		
+			case ip == "": 
+				fmt.Printf("No Ip Address") // nolint		
 			case port == 0:
 				fmt.Printf("IP : %v\n", ip)//nolint
 			default:
