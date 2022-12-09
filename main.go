@@ -35,11 +35,12 @@ func main() {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
 			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
-			if ip == "" {
-				fmt.Printf("No Ip Address") //nolint
-			} else if port == 0 {
+			switch {
+			case ip == "":
+				fmt.Printf("No Ip Address") //nolint		
+			case port == 0:
 				fmt.Printf("IP : %v\n", ip) //nolint
-			} else {
+			default:
 				fmt.Printf("IP : %v Port : %v\n", ip, port) //nolint
 			}
 			return nil
