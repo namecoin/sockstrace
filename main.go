@@ -56,14 +56,14 @@ func main() {
 			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
 			IpPort := fmt.Sprintf("%s:%s", ip, port)
 			if IpPort ==cfg.SocksTcp || ip == "/var/run/nscd/socket"{
-				fmt.Printf("Connecting to %v", IpPort)
+				fmt.Printf("Connecting to %v\n", IpPort)
 			}else {
 				err := unix.Kill(record.PID, syscall.SIGSTOP)
 				if err != nil {
 					panic(err)
 				}
-				
-				fmt.Printf("Blocking -> %v", IpPort)
+
+				fmt.Printf("Blocking -> %v\n", IpPort)
 			}
 		}
 		return nil
