@@ -22,30 +22,48 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
+	"gopkg.in/hlandau/easyconfig.v1"
 )
 
+type Config struct {
+	Program  string `default:"curl"`
+	SocksTcp string `default:"127.0.0.1:9050"`
+	Args     string `default:"--proxy,socks5h://localhost:9050,https://google.com"`
+}
+
 func main() {
+	cfg := Config{}
+
+	config := easyconfig.Configurator{
+		ProgramName: "horklump",
+	}
+
+	config.ParseFatal(&cfg)
+	args := strings.Split(cfg.Args, ",")
+	program := exec.Command(cfg.Program, args...)
+
 	// Start the program with tracing.
-	if err := strace.Trace(exec.Command("ping", "google.com"), func(t strace.Task, record *strace.TraceRecord) error {
+	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
 			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
-			switch {
-			case ip == "":
-				fmt.Printf("No Ip Address") //nolint
-			case port == 0:
-				fmt.Printf("IP : %v\n", ip) //nolint
-			default:
-				fmt.Printf("IP : %v Port : %v\n", ip, port) //nolint
+			IpPort := fmt.Sprintf("%s:%s", ip, port)
+			if IpPort ==cfg.SocksTcp || ip == "/var/run/nscd/socket"{
+				fmt.Printf("Connecting to %v", IpPort)
+			}else {
+				unix.Kill(record.PID, syscall.SIGSTOP)
+				fmt.Printf("Blocking -> %v", IpPort)
 			}
 			return nil
 		}
-		return SocketSysCalls(record)
+		return nil
 	}); err != nil {
 		panic(err)
 	}
@@ -71,7 +89,7 @@ func SocketSysCalls(r *strace.TraceRecord) error {
 	return nil
 }
 
-func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port uint16) { //nolint
+func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port string) { //nolint
 	if len(data) == 0 {
 		return
 	}
@@ -103,15 +121,16 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 
 	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
 	if err != nil {
-		return "", 0
+		return "", ""
 	}
 
 	fulladdr, err := strace.GetAddress(t, socketaddr)
 	if err != nil {
-		return "", 0
+		return "", ""
 	}
 
-	port = fulladdr.Port
+	P := fulladdr.Port
+	port = strconv.Itoa(int(P))
 
 	return ip, port
 }
