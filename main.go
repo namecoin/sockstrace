@@ -58,9 +58,28 @@ func main() {
 			if IpPort ==cfg.SocksTcp || ip == "/var/run/nscd/socket"{
 				fmt.Printf("Connecting to %v\n", IpPort)
 			}else {
-				err := unix.Kill(record.PID, syscall.SIGSTOP)
-				if err != nil {
+				_ = syscall.PtraceSyscall(record.PID, 0)
+				var status unix.WaitStatus
+				if _, err := unix.Wait4(record.PID, &status, 0, nil);err != nil {
+					panic(err.Error())
+				}
+
+				regs := &unix.PtraceRegs{}
+				if err := unix.PtraceSyscall(record.PID, regs);err != nil {
 					panic(err)
+				}
+				regs.Orig_rax = 0
+				if err := unix.PtraceSetRegs(record.PID, regs); err != nil {
+					panic(err)
+				}
+				_ = syscall.PtraceSyscall(record.PID, 0)
+
+				if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
+					panic(err.Error())
+				}
+				switch (regs.Orig_rax) {
+				case 0:
+					syscall.Exit(1)
 				}
 
 				fmt.Printf("Blocking -> %v\n", IpPort)
