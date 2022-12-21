@@ -33,9 +33,9 @@ import (
 )
 
 type Config struct {
-	Program  string `default:"curl"`
+	Program  string `usage:"Program Name"`
 	SocksTcp string `default:"127.0.0.1:9050"`
-	Args     string `default:"--proxy,socks5h://localhost:9050,https://google.com"`
+	Args     []string `usage:"Program Arguments"`
 	KillProg string `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)`
 }
 
@@ -47,8 +47,7 @@ func main() {
 	}
 
 	config.ParseFatal(&cfg)
-	args := strings.Split(cfg.Args, ",")
-	program := exec.Command(cfg.Program, args...)
+	program := exec.Command(cfg.Program, cfg.Args...)
 
 	// Start the program with tracing.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
