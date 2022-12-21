@@ -36,7 +36,7 @@ type Config struct {
 	Program  string `default:"curl"`
 	SocksTcp string `default:"127.0.0.1:9050"`
 	Args     string `default:"--proxy,socks5h://localhost:9050,https://google.com"`
-	KillProg string `default:"n" usage:"Kill the Program incase of a Proxy Leak (y or n)`
+	KillProg string `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)`
 }
 
 func main() {
