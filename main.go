@@ -36,6 +36,7 @@ type Config struct {
 	Program  string `default:"curl"`
 	SocksTcp string `default:"127.0.0.1:9050"`
 	Args     string `default:"--proxy,socks5h://localhost:9050,https://google.com"`
+	KillProg string `default:"n" usage:"Kill the Program incase of a Proxy Leak (y or n)`
 }
 
 func main() {
@@ -59,6 +60,11 @@ func main() {
 			if IpPort ==cfg.SocksTcp || ip == "/var/run/nscd/socket"{
 				fmt.Printf("Connecting to %v\n", IpPort)
 			}else {
+				if strings.ToLower(cfg.KillProg) == "y"	{
+					program.Process.Signal(syscall.SIGKILL)
+					fmt.Printf("Proxy Leak Detected, Killing the Application\n")
+					return nil
+				}
 				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
 					panic(err)
 				}
