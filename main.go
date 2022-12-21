@@ -21,6 +21,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -58,30 +59,35 @@ func main() {
 			if IpPort ==cfg.SocksTcp || ip == "/var/run/nscd/socket"{
 				fmt.Printf("Connecting to %v\n", IpPort)
 			}else {
-				_ = syscall.PtraceSyscall(record.PID, 0)
+				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
+					panic(err)
+				}
 				var status unix.WaitStatus
 				if _, err := unix.Wait4(record.PID, &status, 0, nil);err != nil {
 					panic(err.Error())
 				}
-
+				 
 				regs := &unix.PtraceRegs{}
-				if err := unix.PtraceSyscall(record.PID, regs);err != nil {
+				if err := unix.PtraceGetRegs(record.PID, regs);err != nil {
 					panic(err)
 				}
-				regs.Orig_rax = 0
+				// set to invalid syscall
+				regs.Rax = math.MaxUint64
 				if err := unix.PtraceSetRegs(record.PID, regs); err != nil {
 					panic(err)
 				}
-				_ = syscall.PtraceSyscall(record.PID, 0)
+				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
+					panic(err)
+				}
 
 				if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
 					panic(err.Error())
 				}
-				switch (regs.Orig_rax) {
-				case 0:
-					syscall.Exit(1)
+				switch (regs.Rax) {
+				case math.MaxUint64:
+					unix.PtracePokeUser(record.PID, 0, nil)
 				}
-
+					
 				fmt.Printf("Blocking -> %v\n", IpPort)
 			}
 		}
