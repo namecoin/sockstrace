@@ -62,7 +62,7 @@ func main() {
 			}else {
 				if strings.ToLower(cfg.KillProg) == "y"	{
 					program.Process.Signal(syscall.SIGKILL)
-					fmt.Printf("Proxy Leak Detected, Killing the Application\n")
+					fmt.Printf("Proxy Leak Detected, Killing the Application.\n")
 					return nil
 				}
 				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
