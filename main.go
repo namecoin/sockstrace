@@ -19,6 +19,7 @@
 package main
 
 import (
+	"os"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -48,6 +49,7 @@ func main() {
 
 	config.ParseFatal(&cfg)
 	program := exec.Command(cfg.Program, cfg.Args...)
+	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
 
 	// Start the program with tracing.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
