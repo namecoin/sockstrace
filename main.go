@@ -19,10 +19,10 @@
 package main
 
 import (
-	"os"
 	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -34,15 +34,14 @@ import (
 )
 
 type Config struct {
-	Program  string `usage:"Program Name"`
-	SocksTcp string `default:"127.0.0.1:9050"`
+	Program  string   `usage:"Program Name"`
+	SocksTCP string   `default:"127.0.0.1:9050"`
 	Args     []string `usage:"Program Arguments"`
-	KillProg string `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)`
+	KillProg string   `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)`
 }
 
 func main() {
 	cfg := Config{}
-
 	config := easyconfig.Configurator{
 		ProgramName: "horklump",
 	}
@@ -57,12 +56,16 @@ func main() {
 			data := strace.SysCallEnter(t, record.Syscall)
 			// Detect the IP and Port.
 			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
-			IpPort := fmt.Sprintf("%s:%s", ip, port)
-			if IpPort ==cfg.SocksTcp || ip == "/var/run/nscd/socket"{
-				fmt.Printf("Connecting to %v\n", IpPort)
-			}else {
-				if strings.ToLower(cfg.KillProg) == "y"	{
-					program.Process.Signal(syscall.SIGKILL)
+			IPPort := fmt.Sprintf("%s:%s", ip, port)
+			if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" {
+				fmt.Printf("Connecting to %v\n", IPPort) //nolint
+			} else {
+				if strings.ToLower(cfg.KillProg) == "y" {
+					err := program.Process.Signal(syscall.SIGKILL)
+					if err != nil {
+						fmt.Println("Failed to kill the application: %v\n", err) //nolint
+						panic(err)
+					}
 					fmt.Printf("Proxy Leak Detected, Killing the Application.\n")
 					return nil
 				}
@@ -70,12 +73,12 @@ func main() {
 					panic(err)
 				}
 				var status unix.WaitStatus
-				if _, err := unix.Wait4(record.PID, &status, 0, nil);err != nil {
+				if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
 					panic(err.Error())
 				}
-				 
+
 				regs := &unix.PtraceRegs{}
-				if err := unix.PtraceGetRegs(record.PID, regs);err != nil {
+				if err := unix.PtraceGetRegs(record.PID, regs); err != nil {
 					panic(err)
 				}
 				// set to invalid syscall
@@ -90,12 +93,8 @@ func main() {
 				if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
 					panic(err.Error())
 				}
-				switch (regs.Rax) {
-				case math.MaxUint64:
-					unix.PtracePokeUser(record.PID, 0, nil)
-				}
-					
-				fmt.Printf("Blocking -> %v\n", IpPort)
+
+				fmt.Printf("Blocking -> %v\n", IPPort) //nolint
 			}
 		}
 		return nil
@@ -105,7 +104,7 @@ func main() {
 }
 
 // SocketSysCalls checks if a syscall is a socket syscall.
-func SocketSysCalls(r *strace.TraceRecord) error {
+func SocketSysCalls(r *strace.TraceRecord) error { //nolint
 	// Socket call functions from Ubuntu Manuals (https://manpages.ubuntu.com/manpages/bionic/man2/socketcall.2.html)
 	socketfunctions := map[string]struct{}{
 		"socket": {}, "bind": {}, "connect": {}, "listen": {}, "accept": {}, "getsockname": {},
