@@ -31,6 +31,7 @@ import (
 	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
+	"github.com/rs/xlog"
 )
 
 type Config struct {
@@ -38,6 +39,7 @@ type Config struct {
 	SocksTCP string   `default:"127.0.0.1:9050"`
 	Args     []string `usage:"Program Arguments"`
 	KillProg string   `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)`
+	LogLeaks string	  `default:"n" usage:"Allow Proxy Leaks but Log any that Occur"`
 }
 
 func main() {
@@ -61,13 +63,7 @@ func main() {
 				fmt.Printf("Connecting to %v\n", IPPort) //nolint
 			} else {
 				if strings.ToLower(cfg.KillProg) == "y" {
-					err := program.Process.Signal(syscall.SIGKILL)
-					if err != nil {
-						fmt.Println("Failed to kill the application: %v\n", err) //nolint
-						panic(err)
-					}
-					fmt.Printf("Proxy Leak Detected, Killing the Application.\n")
-					return nil
+					KillApp(program, IPPort)
 				}
 				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
 					panic(err)
@@ -167,4 +163,13 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 	port = strconv.Itoa(int(P))
 
 	return ip, port
+}
+
+func KillApp(program *exec.Cmd, IPPort string)  {
+	err := program.Process.Signal(syscall.SIGKILL)
+	if err != nil {
+		fmt.Println("Failed to kill the application: %v\n", err) //nolint
+		panic(err)
+	}
+	fmt.Printf("Proxy Leak Detected : %v. Killing the Application.\n")
 }
