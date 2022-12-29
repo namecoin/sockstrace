@@ -62,8 +62,13 @@ func main() {
 			if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" {
 				fmt.Printf("Connecting to %v\n", IPPort) //nolint
 			} else {
+				if strings.ToLower(cfg.LogLeaks) ==  "y" {
+					xlog.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
+					return nil
+				}
 				if strings.ToLower(cfg.KillProg) == "y" {
 					KillApp(program, IPPort)
+					return nil
 				}
 				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
 					panic(err)
