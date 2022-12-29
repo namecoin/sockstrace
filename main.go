@@ -38,8 +38,8 @@ type Config struct {
 	Program  string   `usage:"Program Name"`
 	SocksTCP string   `default:"127.0.0.1:9050"`
 	Args     []string `usage:"Program Arguments"`
-	KillProg string   `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)`
-	LogLeaks string	  `default:"n" usage:"Allow Proxy Leaks but Log any that Occur"`
+	KillProg string   `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)"`
+	LogLeaks string	  `default:"n" usage:"Allow Proxy Leaks but Log any that Occur (y or n)"`
 }
 
 func main() {
