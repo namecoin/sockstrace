@@ -176,5 +176,5 @@ func KillApp(program *exec.Cmd, IPPort string)  {
 		fmt.Println("Failed to kill the application: %v\n", err) //nolint
 		panic(err)
 	}
-	fmt.Printf("Proxy Leak Detected : %v. Killing the Application.\n")
+	fmt.Printf("Proxy Leak Detected : %v. Killing the Application.\n", IPPort)
 }
