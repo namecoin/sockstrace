@@ -40,6 +40,7 @@ type Config struct {
 	Args     []string `usage:"Program Arguments"`
 	KillProg string   `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)"`
 	LogLeaks string	  `default:"n" usage:"Allow Proxy Leaks but Log any that Occur (y or n)"`
+	EnvVar	 string	  `default:"y" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (y or n)"`
 }
 
 func main() {
@@ -51,6 +52,9 @@ func main() {
 	config.ParseFatal(&cfg)
 	program := exec.Command(cfg.Program, cfg.Args...)
 	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if strings.ToLower(cfg.EnvVar) == "y" {
+		cfg.SocksTCP = SetEnv(cfg.SocksTCP, os.Getenv("TOR_SOCKS_HOST"), os.Getenv("TOR_SOCKS_PORT"))
+	}
 
 	// Start the program with tracing.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
@@ -177,4 +181,17 @@ func KillApp(program *exec.Cmd, IPPort string)  {
 		panic(err)
 	}
 	fmt.Printf("Proxy Leak Detected : %v. Killing the Application.\n", IPPort)
+}
+
+func SetEnv(socks string, host string, port string) string {
+	tcpsocks := strings.Split(socks, ":")
+	if host == "" && port != "" {
+		return tcpsocks[0]+":"+port
+	} else if host != "" && port == "" {
+		return host+":"+tcpsocks[1]
+	} else if host != "" && port != "" {
+		return host+":"+port
+	} else {
+		return socks
+	}
 }
