@@ -72,9 +72,9 @@ func main() {
 }
 
 func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error{
-	data := strace.SysCallEnter(t, record.Syscall)
+	data := strace.SysCallEnter(task, record.Syscall)
 	// Detect the IP and Port.
-	ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
+	ip, port := GetIPAndPortdata(data, task, record.Syscall.Args)
 	IPPort := fmt.Sprintf("%s:%s", ip, port)
 	if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" {
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
