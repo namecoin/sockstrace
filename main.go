@@ -63,53 +63,58 @@ func main() {
 	// Start the program with tracing.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
-			data := strace.SysCallEnter(t, record.Syscall)
-			// Detect the IP and Port.
-			ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
-			IPPort := fmt.Sprintf("%s:%s", ip, port)
-			if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" {
-				fmt.Printf("Connecting to %v\n", IPPort) //nolint
-			} else {
-				if strings.ToLower(cfg.LogLeaks) ==  "y" {
-					log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
-					return nil
-				}
-				if strings.ToLower(cfg.KillProg) == "y" {
-					KillApp(program, IPPort)
-					return nil
-				}
-				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
-					panic(err)
-				}
-				var status unix.WaitStatus
-				if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
-					panic(err.Error())
-				}
-
-				regs := &unix.PtraceRegs{}
-				if err := unix.PtraceGetRegs(record.PID, regs); err != nil {
-					panic(err)
-				}
-				// set to invalid syscall
-				regs.Rax = math.MaxUint64
-				if err := unix.PtraceSetRegs(record.PID, regs); err != nil {
-					panic(err)
-				}
-				if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
-					panic(err)
-				}
-
-				if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
-					panic(err.Error())
-				}
-
-				fmt.Printf("Blocking -> %v\n", IPPort) //nolint
-			}
+			HandleConnect(t, record, program, cfg)
 		}
 		return nil
 	}); err != nil {
 		panic(err)
 	}
+}
+
+func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error{
+	data := strace.SysCallEnter(t, record.Syscall)
+	// Detect the IP and Port.
+	ip, port := GetIPAndPortdata(data, t, record.Syscall.Args)
+	IPPort := fmt.Sprintf("%s:%s", ip, port)
+	if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" {
+		fmt.Printf("Connecting to %v\n", IPPort) //nolint
+	} else {
+			if strings.ToLower(cfg.LogLeaks) ==  "y" {
+				log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
+				return nil
+			}
+			if strings.ToLower(cfg.KillProg) == "y" {
+				KillApp(program, IPPort)
+				return nil
+			}
+			if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
+				panic(err)
+			}
+			var status unix.WaitStatus
+			if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
+				panic(err.Error())
+			}
+
+			regs := &unix.PtraceRegs{}
+			if err := unix.PtraceGetRegs(record.PID, regs); err != nil {
+				panic(err)
+			}
+			// set to invalid syscall
+			regs.Rax = math.MaxUint64
+			if err := unix.PtraceSetRegs(record.PID, regs); err != nil {
+				panic(err)
+			}
+			if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
+				panic(err)
+			}
+
+			if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
+				panic(err.Error())
+			}
+
+			fmt.Printf("Blocking -> %v\n", IPPort) //nolint
+			}
+	return nil
 }
 
 // SocketSysCalls checks if a syscall is a socket syscall.
