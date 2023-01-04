@@ -31,8 +31,11 @@ import (
 	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
-	"github.com/rs/xlog"
+	"github.com/hlandau/xlog"
+	"github.com/hlandau/dexlogconfig"
 )
+
+var log, _ = xlog.New("horklump")
 
 type Config struct {
 	Program  string   `usage:"Program Name"`
@@ -50,6 +53,7 @@ func main() {
 	}
 
 	config.ParseFatal(&cfg)
+	dexlogconfig.Init()
 	program := exec.Command(cfg.Program, cfg.Args...)
 	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if strings.ToLower(cfg.EnvVar) == "y" {
@@ -67,7 +71,7 @@ func main() {
 				fmt.Printf("Connecting to %v\n", IPPort) //nolint
 			} else {
 				if strings.ToLower(cfg.LogLeaks) ==  "y" {
-					xlog.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
+					log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
 					return nil
 				}
 				if strings.ToLower(cfg.KillProg) == "y" {
