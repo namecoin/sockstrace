@@ -90,7 +90,10 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			KillApp(program, IPPort)
 			return nil
 		}	
-		BlockSyscall(record.PID)
+		err := BlockSyscall(record.PID)
+		if err != nil {
+			return err
+		}
 
 		fmt.Printf("Blocking -> %v\n", IPPort) //nolint
 	}
@@ -192,7 +195,9 @@ func BlockSyscall(pid int) error {
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
 		return err
 	}
+
 	var status unix.WaitStatus
+
 	if _, err := unix.Wait4(pid, &status, 0, nil); err != nil {
 		return err
 	}
@@ -201,6 +206,7 @@ func BlockSyscall(pid int) error {
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
 		return err
 	}
+	
 	// set to invalid syscall
 	regs.Rax = math.MaxUint64
 	if err := unix.PtraceSetRegs(pid, regs); err != nil {
