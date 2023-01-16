@@ -89,31 +89,8 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 		if strings.ToLower(cfg.KillProg) == "y" {
 			KillApp(program, IPPort)
 			return nil
-		}
-		if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
-			return err
-		}
-		var status unix.WaitStatus
-		if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
-			return err
-		}
-
-		regs := &unix.PtraceRegs{}
-		if err := unix.PtraceGetRegs(record.PID, regs); err != nil {
-			return err
-		}
-		// set to invalid syscall
-		regs.Rax = math.MaxUint64
-		if err := unix.PtraceSetRegs(record.PID, regs); err != nil {
-			return err
-		}
-		if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
-			return err
-		}
-
-		if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
-			return err
-		}
+		}	
+		BlockSyscall(record.PID)
 
 		fmt.Printf("Blocking -> %v\n", IPPort) //nolint
 	}
@@ -209,4 +186,33 @@ func SetEnv(socks string, host string, port string) string {
 	default:
 		return socks
 	}
+}
+
+func BlockSyscall (pid int) error {
+	if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
+		return err
+	}
+	var status unix.WaitStatus
+	if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
+		return err
+	}
+
+	regs := &unix.PtraceRegs{}
+	if err := unix.PtraceGetRegs(record.PID, regs); err != nil {
+		return err
+	}
+	// set to invalid syscall
+	regs.Rax = math.MaxUint64
+	if err := unix.PtraceSetRegs(record.PID, regs); err != nil {
+		return err
+	}
+	if err := syscall.PtraceSyscall(record.PID, 0); err != nil {
+		return err
+	}
+
+	if _, err := unix.Wait4(record.PID, &status, 0, nil); err != nil {
+		return err
+	}
+
+	return nil
 }
