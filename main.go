@@ -89,7 +89,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 		if strings.ToLower(cfg.KillProg) == "y" {
 			KillApp(program, IPPort)
 			return nil
-		}	
+		}
 		err := BlockSyscall(record.PID)
 		if err != nil {
 			return err
@@ -206,12 +206,13 @@ func BlockSyscall(pid int) error {
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
 		return err
 	}
-	
+
 	// set to invalid syscall
 	regs.Rax = math.MaxUint64
 	if err := unix.PtraceSetRegs(pid, regs); err != nil {
 		return err
 	}
+
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
 		return err
 	}
