@@ -196,9 +196,7 @@ func BlockSyscall(pid int) error {
 		return err
 	}
 
-	var status unix.WaitStatus
-
-	if _, err := unix.Wait4(pid, &status, 0, nil); err != nil {
+	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
 		return err
 	}
 
@@ -217,7 +215,7 @@ func BlockSyscall(pid int) error {
 		return err
 	}
 
-	if _, err := unix.Wait4(pid, &status, 0, nil); err != nil {
+	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
 		return err
 	}
 
