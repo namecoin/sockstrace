@@ -20,7 +20,3 @@ along with heteronculous-horklump.  If not, see [https://www.gnu.org/licenses/](
 
 Namecoin is produced independently from the Tor® anonymity software and carries no guarantee from The Tor Project about quality, suitability or anything else.
 
-Testing example commands: 
-curl --socks5 127.0.0.1:9050 https://www.google.com/
-nc -z -v 127.0.0.1 9050
-nc -z -v -u 127.0.0.1 9050 (Testing redirection of connection to a UDP server. Setting of Host and Port was done using env variables [UDP Server](https://github.com/robertmin1/UDP-Server) )
