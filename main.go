@@ -18,35 +18,55 @@
 
 package main
 
+/*
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <string.h>
+*/
+import "C"
+
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"github.com/hlandau/dexlogconfig"
 	"github.com/hlandau/xlog"
+	"github.com/oraoto/go-pidfd"
 	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
 )
 
-var log, _ = xlog.New("horklump")
+var (
+	log, _            = xlog.New("horklump")
+	UDPProtolNum byte = 0x11
+)
 
+// Config is a struct to store the program's configuration values.
 type Config struct {
 	Program  string   `usage:"Program Name"`
 	SocksTCP string   `default:"127.0.0.1:9050"`
 	Args     []string `usage:"Program Arguments"`
-	KillProg string   `default:"n" usage:"Kill the Program in case of a Proxy Leak (y or n)"`
-	LogLeaks string   `default:"n" usage:"Allow Proxy Leaks but Log any that Occur (y or n)"`
-	EnvVar   string   `default:"y" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (y or n)"`
+	KillProg bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
+	LogLeaks bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
+	EnvVar   bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
+	Redirect bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
+	Proxyusr string   `default:"" usage:"Proxy username in case of proxy redirection"`
+	Proxypas string   `default:"" usage:"Proxy password in case of proxy redirection"`
 }
 
 func main() {
+	// Create a Config and initialize it with default values.
 	cfg := Config{}
 	config := easyconfig.Configurator{
 		ProgramName: "horklump",
@@ -54,18 +74,25 @@ func main() {
 
 	config.ParseFatal(&cfg)
 	dexlogconfig.Init()
-	program := exec.Command(cfg.Program, cfg.Args...) //nolint
+	// Create a new command struct for the specific program and arguments
+	program := exec.Command(cfg.Program, cfg.Args...)
 	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
 
-	if strings.ToLower(cfg.EnvVar) == "y" {
-		cfg.SocksTCP = SetEnv(cfg.SocksTCP, os.Getenv("TOR_SOCKS_HOST"), os.Getenv("TOR_SOCKS_PORT"))
+	if cfg.EnvVar {
+		cfg.SocksTCP = SetEnv(cfg)
 	}
 
-	// Start the program with tracing.
+	// Start the program with tracing and handle the CONNECT system call events.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			if err := HandleConnect(t, record, program, cfg); err != nil {
-				panic(err)
+				return err
+			}
+		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
+			if cfg.Redirect {
+				if err := Socksify(record.Syscall.Args, record, t); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -82,43 +109,60 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" { //nolint
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
 	} else {
-		if strings.ToLower(cfg.LogLeaks) == "y" {
+		if cfg.LogLeaks {
 			log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
 			return nil
 		}
-		if strings.ToLower(cfg.KillProg) == "y" {
+		if cfg.KillProg {
 			KillApp(program, IPPort)
 			return nil
 		}
-		err := BlockSyscall(record.PID)
+		if cfg.Redirect {
+			err := RedirectConns(record.Syscall.Args, cfg, record)
+			return err
+		}
+		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
 			return err
 		}
-
-		fmt.Printf("Blocking -> %v\n", IPPort) //nolint
 	}
 
 	return nil
 }
 
-// SocketSysCalls checks if a syscall is a socket syscall.
-func SocketSysCalls(r *strace.TraceRecord) error { //nolint
-	// Socket call functions from Ubuntu Manuals (https://manpages.ubuntu.com/manpages/bionic/man2/socketcall.2.html)
-	socketfunctions := map[string]struct{}{
-		"socket": {}, "bind": {}, "connect": {}, "listen": {}, "accept": {}, "getsockname": {},
-		"getpeername": {}, "socketpair": {}, "send": {}, "recv": {}, "sendto": {}, "recvfrom": {}, "shutdown": {}, "setsockopt": {},
-		"getsockopt": {}, "sendmsg": {}, "recvmsg": {}, "accept4": {}, "recvmmsg": {}, "sendmmsg": {},
+// eventName returns an event name. There should never be an event name
+// we do not known and, if we encounter one, we panic.
+func eventName(r *strace.TraceRecord) (string, error) { //nolint
+	// form up a reasonable name for a system call.
+	// If there is no name, then it will be Exxxx or Xxxxx, where x
+	// is the system call number as %04x.
+	// Note that users can specify this: E0x0000, for example
+	var sysName string
+
+	switch r.Event {
+	case strace.SyscallEnter, strace.SyscallExit:
+		var err error
+		if sysName, err = strace.ByNumber(uintptr(r.Syscall.Sysno)); err != nil {
+			sysName = fmt.Sprintf("%04x", r.Syscall.Sysno)
+		}
 	}
 
-	// Get the name of the Socket System Call
-	SyscallName, _ := strace.ByNumber(uintptr(r.Syscall.Sysno))
-	// Check if it's a Socket System Call
-	if _, err := socketfunctions[SyscallName]; !err {
-		return nil
+	switch r.Event {
+	case strace.SyscallEnter:
+		return sysName, nil
+	case strace.SyscallExit:
+		return sysName, nil
+	case strace.SignalExit:
+		return fmt.Sprintf("SignalExit"), nil
+	case strace.Exit:
+		return fmt.Sprintf("Exit"), nil
+	case strace.SignalStop:
+		return fmt.Sprintf("SignalStop"), nil
+	case strace.NewChild:
+		return fmt.Sprintf("NewChild"), nil
 	}
-	fmt.Printf("Detected a Socket System Call: %v\n", SyscallName) //nolint
 
-	return nil
+	return "", fmt.Errorf("unknown event %#x from record %v", r.Event, r)
 }
 
 func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port string) { //nolint
@@ -167,6 +211,7 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 	return ip, port
 }
 
+// Kill the application in case of a proxy leak.
 func KillApp(program *exec.Cmd, iPPort string) {
 	err := program.Process.Signal(syscall.SIGKILL)
 	if err != nil {
@@ -176,22 +221,27 @@ func KillApp(program *exec.Cmd, iPPort string) {
 	fmt.Printf("Proxy Leak Detected : %v. Killing the Application.\n", iPPort) //nolint
 }
 
-func SetEnv(socks string, host string, port string) string {
-	tcpsocks := strings.Split(socks, ":")
+// Setting environment variables.
+func SetEnv(cfg Config) string {
+	host, port := os.Getenv("TOR_SOCKS_HOST"), os.Getenv("TOR_SOCKS_PORT")
+	TCPhost, TCPport, _ := net.SplitHostPort(cfg.SocksTCP)
 
+	// Handling some edge cases, incase only one Environment variable is provided.
 	switch {
 	case (host == "" && port != ""):
-		return tcpsocks[0] + ":" + port
+		return TCPhost + ":" + port
 	case (host != "" && port == ""):
-		return host + ":" + tcpsocks[1]
+		return host + ":" + TCPport
 	case (host != "" && port != ""):
 		return host + ":" + port
 	default:
-		return socks
+		return cfg.SocksTCP
 	}
 }
 
-func BlockSyscall(pid int) error {
+// Blocking a syscall by changing the syscall number, converting it to a syscall that doesn't exist.
+func BlockSyscall(pid int, ipport string) error {
+	// Trace the syscall
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
 		return err
 	}
@@ -200,12 +250,13 @@ func BlockSyscall(pid int) error {
 		return err
 	}
 
+	// Struct to store the current register values from unix.PtraceGetRegs
 	regs := &unix.PtraceRegs{}
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
 		return err
 	}
 
-	// set to invalid syscall
+	// Set to invalid syscall and set the new register values
 	regs.Rax = math.MaxUint64
 	if err := unix.PtraceSetRegs(pid, regs); err != nil {
 		return err
@@ -218,6 +269,84 @@ func BlockSyscall(pid int) error {
 	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
 		return err
 	}
+
+	fmt.Printf("Blocking -> %v\n", ipport) //nolint
+
+	return nil
+}
+
+func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.TraceRecord) error {
+	// Extrating the address that holds the IP/Port information
+	addr := args[1].Pointer()
+	addrlen := args[2].Uint()
+	host, port, _ := net.SplitHostPort(cfg.SocksTCP)
+	parsedhost := net.ParseIP(host)
+
+	pokeData := make([]byte, addrlen)
+	// Support for UDP will be implemented
+	// Switch is used to differentiate if the proxy is IPv4/IPv5/UDP/Invalid Proxy
+	switch {
+	// If ip is not IPv4 address, To4 returns nil
+	case parsedhost.To4() != nil:
+		var addrStruct C.struct_sockaddr_in
+		addrStruct.sin_family = C.AF_INET
+		intPort, _ := strconv.Atoi(port)
+		addrStruct.sin_port = C.htons(C.in_port_t(intPort))
+		ip := C.CString(host)
+
+		defer C.free(unsafe.Pointer(ip))
+
+		addrStruct.sin_addr.s_addr = C.inet_addr(ip)
+		pokeData = C.GoBytes(unsafe.Pointer(&addrStruct), C.sizeof_struct_sockaddr_in) //nolint
+	// If ip is not IPv6 address, To16 returns nil
+	case parsedhost.To16() != nil:
+		hostData := parsedhost.To16()
+
+		var addrStruct C.struct_sockaddr_in6
+		addrStruct.sin6_family = C.AF_INET6
+		intPort, _ := strconv.Atoi(port)
+		addrStruct.sin6_port = C.htons(C.in_port_t(intPort))
+		C.memcpy(unsafe.Pointer(&addrStruct.sin6_addr), unsafe.Pointer(&hostData[0]), C.size_t(len(hostData))) //nolint
+
+		pokeData = C.GoBytes(unsafe.Pointer(&addrStruct), C.int(unsafe.Sizeof(addrStruct))) //nolint
+	case parsedhost.To4()[0] == UDPProtolNum:
+		fmt.Println("Support for UDP will be implemented") //nolint
+	default:
+		return errors.New("invalid ip address")
+	}
+
+	// Poking our proxy IP/Port to the address containing the original address
+	if _, err := unix.PtracePokeData(record.PID, uintptr(addr), pokeData); err != nil {
+		return err
+	}
+
+	fmt.Printf("Connecting to %v\n", cfg.SocksTCP) //nolint
+
+	return nil
+}
+
+func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task) error {
+	fd := record.Syscall.Args[0].Uint()
+
+	p, err := pidfd.Open(record.PID, 0)
+	if err != nil {
+		return err
+	}
+
+	listenfd, err := p.GetFd(int(fd), 0)
+	if err != nil {
+		return err
+	}
+
+	file := os.NewFile(uintptr(listenfd), "")
+
+	conn, err := net.FileConn(file)
+	if err != nil {
+		return err
+	}
+
+	// For Debugging purposes
+	fmt.Println(conn) //nolint
 
 	return nil
 }
