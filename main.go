@@ -276,7 +276,7 @@ func BlockSyscall(pid int, ipport string) error {
 }
 
 func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.TraceRecord) error {
-	// Extrating the address that holds the IP/Port information.
+	// Extrating the address that holds the IP/Port information
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
 	host, port, _ := net.SplitHostPort(cfg.SocksTCP)
