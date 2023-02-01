@@ -53,7 +53,7 @@ var (
 )
 
 type Address struct {
-	ip net.IP
+	ip   net.IP
 	port int
 }
 
@@ -108,14 +108,17 @@ func main() {
 
 func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error {
 	var IPPort string
+
 	data := strace.SysCallEnter(task, record.Syscall)
+
 	addrstruct, path, err := GetIPAndPortdata(data, task, record.Syscall.Args)
 	if err != nil {
 		return err
 	}
+
 	if addrstruct.ip == nil {
 		IPPort = path
-	}else {
+	} else {
 		IPPort = addrstruct.String()
 	}
 
@@ -176,14 +179,14 @@ func eventName(r *strace.TraceRecord) (string, error) { //nolint
 	return "", fmt.Errorf("unknown event %#x from record %v", r.Event, r)
 }
 
-func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (Address, string, error) { 
+func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (Address, string, error) {
 	if len(data) == 0 {
 		return Address{}, "", nil
 	}
 	//  For the time being, the string slicing method is being used to extract the Address.
 	var ip string
-	s1 := strings.Index(data, "Addr:")
 
+	s1 := strings.Index(data, "Addr:")
 	if s1 != -1 {
 		s2 := strings.Index(data[s1:], "}")
 		s3 := strings.Index(data[s1:], ",")
@@ -219,7 +222,7 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 	}
 
 	P := fulladdr.Port
-	
+
 	switch {
 	case net.ParseIP(ip) == nil:
 		return Address{}, ip, nil
