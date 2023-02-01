@@ -270,7 +270,7 @@ func BlockSyscall(pid int, ipport string) error {
 		return err
 	}
 
-	// Struct to store the current register values from unix.PtraceGetRegs
+	// Struct to store the current register values from unix.PtraceGetRegs.
 	regs := &unix.PtraceRegs{}
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
 		return err
