@@ -223,7 +223,7 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 	case net.ParseIP(ip) == nil:
 		return Address{}, ip, nil
 	default:
-		return Address{ip: net.ParseIP(ip), port: P}, "", nil
+		return Address{ip: net.ParseIP(ip), port: int(P)}, "", nil
 	}
 }
 
