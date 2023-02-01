@@ -52,6 +52,11 @@ var (
 	UDPProtolNum byte = 0x11
 )
 
+type Address struct {
+	ip net.IP
+	port int
+}
+
 // Config is a struct to store the program's configuration values.
 type Config struct {
 	Program  string   `usage:"Program Name"`
@@ -102,31 +107,37 @@ func main() {
 }
 
 func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error {
+	var IPPort string
 	data := strace.SysCallEnter(task, record.Syscall)
 	// Detect the IP and Port.
-	ip, port := GetIPAndPortdata(data, task, record.Syscall.Args)
-	IPPort := fmt.Sprintf("%s:%s", ip, port)
-	if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" { //nolint
+	addrstruct, path, err := GetIPAndPortdata(data, task, record.Syscall.Args)
+	if err != nil {
+		return err
+	}
+	if addrstruct.ip == nil {
+		IPPort = path
+	}else {
+		IPPort = addrstruct.String()
+	}
+
+	switch {
+	case IPPort == cfg.SocksTCP:
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
-	} else {
-		if cfg.LogLeaks {
-			log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
-			return nil
-		}
-		if cfg.KillProg {
-			KillApp(program, IPPort)
-			return nil
-		}
-		if cfg.Redirect {
-			err := RedirectConns(record.Syscall.Args, cfg, record)
-			return err
-		}
+	case cfg.LogLeaks:
+		log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
+		return nil
+	case cfg.KillProg:
+		KillApp(program, IPPort)
+		return nil
+	case cfg.Redirect:
+		err := RedirectConns(record.Syscall.Args, cfg, record)
+		return err
+	default:
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -165,11 +176,12 @@ func eventName(r *strace.TraceRecord) (string, error) { //nolint
 	return "", fmt.Errorf("unknown event %#x from record %v", r.Event, r)
 }
 
-func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port string) { //nolint
+func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (Address, string, error) { //nolint
 	if len(data) == 0 {
-		return
+		return Address{}, "", nil
 	}
 	//  For the time being, the string slicing method is being used to extract the Address.
+	var ip string
 	s1 := strings.Index(data, "Addr:")
 	if s1 != -1 {
 		s2 := strings.Index(data[s1:], "}")
@@ -197,18 +209,22 @@ func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) 
 
 	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
 	if err != nil {
-		return "", ""
+		return Address{}, "", err
 	}
 
 	fulladdr, err := strace.GetAddress(t, socketaddr)
 	if err != nil {
-		return "", ""
+		return Address{}, "", err
 	}
 
 	P := fulladdr.Port
-	port = strconv.Itoa(int(P))
-
-	return ip, port
+	
+	switch {
+	case net.ParseIP(ip) == nil:
+		return Address{}, ip, nil
+	default:
+		return Address{ip: net.ParseIP(ip), port: P}, "", nil
+	}
 }
 
 // Kill the application in case of a proxy leak.
@@ -349,4 +365,8 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	fmt.Println(conn) //nolint
 
 	return nil
+}
+
+func (i Address) String() string {
+	return fmt.Sprintf("%s:%d", i.ip.String(), i.port)
 }
