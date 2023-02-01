@@ -109,7 +109,6 @@ func main() {
 func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error {
 	var IPPort string
 	data := strace.SysCallEnter(task, record.Syscall)
-	// Detect the IP and Port.
 	addrstruct, path, err := GetIPAndPortdata(data, task, record.Syscall.Args)
 	if err != nil {
 		return err
@@ -138,6 +137,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -176,13 +176,14 @@ func eventName(r *strace.TraceRecord) (string, error) { //nolint
 	return "", fmt.Errorf("unknown event %#x from record %v", r.Event, r)
 }
 
-func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (Address, string, error) { //nolint
+func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (Address, string, error) { 
 	if len(data) == 0 {
 		return Address{}, "", nil
 	}
 	//  For the time being, the string slicing method is being used to extract the Address.
 	var ip string
 	s1 := strings.Index(data, "Addr:")
+
 	if s1 != -1 {
 		s2 := strings.Index(data[s1:], "}")
 		s3 := strings.Index(data[s1:], ",")
