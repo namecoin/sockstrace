@@ -27,7 +27,8 @@ package main
 import "C"
 
 import (
-	"encoding/hex"
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -43,6 +44,7 @@ import (
 	"github.com/hlandau/xlog"
 	"github.com/oraoto/go-pidfd"
 	"github.com/u-root/u-root/pkg/strace"
+	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
 )
@@ -50,6 +52,7 @@ import (
 var (
 	log, _            = xlog.New("horklump")
 	UDPProtolNum byte = 0x11
+	nullByte          = "\x00"
 )
 
 // Config is a struct to store the program's configuration values.
@@ -63,6 +66,17 @@ type Config struct {
 	Redirect bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
 	Proxyusr string   `default:"" usage:"Proxy username in case of proxy redirection"`
 	Proxypas string   `default:"" usage:"Proxy password in case of proxy redirection"`
+}
+
+// FullAddress is the network address and port
+type FullAddress struct {
+	// Addr is the network address.
+	Addr string
+
+	// Port is the transport port.
+	//
+	// This may not be used by all endpoint types.
+	Port uint16
 }
 
 func main() {
@@ -102,11 +116,14 @@ func main() {
 }
 
 func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error {
-	data := strace.SysCallEnter(task, record.Syscall)
-	// Detect the IP and Port.
-	ip, port := GetIPAndPortdata(data, task, record.Syscall.Args)
-	IPPort := fmt.Sprintf("%s:%s", ip, port)
-	if IPPort == cfg.SocksTCP || ip == "/var/run/nscd/socket" { //nolint
+	// Parse the IP and Port.
+	address, err := ParseAddress(task, record.Syscall.Args)
+	if err != nil {
+		return err
+	}
+
+	IPPort := address.String()
+	if IPPort == cfg.SocksTCP { //nolint
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
 	} else {
 		if cfg.LogLeaks {
@@ -165,50 +182,91 @@ func eventName(r *strace.TraceRecord) (string, error) { //nolint
 	return "", fmt.Errorf("unknown event %#x from record %v", r.Event, r)
 }
 
-func GetIPAndPortdata(data string, t strace.Task, args strace.SyscallArguments) (ip string, port string) { //nolint
-	if len(data) == 0 {
-		return
-	}
-	//  For the time being, the string slicing method is being used to extract the Address.
-	s1 := strings.Index(data, "Addr:")
-	if s1 != -1 {
-		s2 := strings.Index(data[s1:], "}")
-		s3 := strings.Index(data[s1:], ",")
-
-		if s2 < s3 {
-			ip = data[s1+5 : s1+s2]
-		} else {
-			ip = data[s1+5 : s1+s3]
-		}
-
-		ip = strings.ReplaceAll(ip, `"`, "")
-		ip = strings.ReplaceAll(ip, ` `, "")
-
-		if ip[:2] == "0x" {
-			ip = ip[2:]
-			// Decode the Address
-			a, _ := hex.DecodeString(ip)
-			ip = fmt.Sprintf("%v.%v.%v.%v", a[0], a[1], a[2], a[3])
-		}
-	}
-	// To extract the Port, we use the functions - CaptureAddress and GetAddress.
+// ParseAddress reads an sockaddr struct from the given address and converts it
+// to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
+// addresses.
+func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
 
 	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
 	if err != nil {
-		return "", ""
+		return FullAddress{}, fmt.Errorf("failed to parse socket address: %w", err)
 	}
 
-	fulladdr, err := strace.GetAddress(t, socketaddr)
-	if err != nil {
-		return "", ""
+	famBuf := bytes.NewBuffer(socketaddr[:2])
+
+	var fam uint16
+	if err := binary.Read(famBuf, ubinary.NativeEndian, &fam); err != nil {
+		return FullAddress{}, fmt.Errorf("error while reading binary data: %w", err)
 	}
 
-	P := fulladdr.Port
-	port = strconv.Itoa(int(P))
+	// Get the rest of the fields based on the address family.
+	switch fam {
+	case unix.AF_UNIX:
+		path := socketaddr[2:]
+		if len(path) > unix.PathMax {
+			return FullAddress{}, unix.EINVAL
+		}
+		// Drop the terminating NUL (if one exists) and everything after
+		// it for filesystem (non-abstract) addresses.
+		if len(path) > 0 && path[0] != 0 {
+			if n := bytes.IndexByte(path[1:], 0); n >= 0 {
+				path = path[:n+1]
+			}
+		}
 
-	return ip, port
+		return FullAddress{
+			Addr: string(path),
+		}, nil
+
+	case unix.AF_INET:
+		var inet4Addr unix.RawSockaddrInet4
+
+		famBuf = bytes.NewBuffer(socketaddr)
+		if err := binary.Read(famBuf, binary.BigEndian, &inet4Addr); err != nil {
+			return FullAddress{}, unix.EFAULT
+		}
+
+		ip := net.IP(inet4Addr.Addr[:])
+		out := FullAddress{
+			Addr: ip.String(),
+			Port: inet4Addr.Port,
+		}
+
+		if out.Addr == "\x00\x00\x00\x00" {
+			out.Addr = ""
+		}
+
+		return out, nil
+
+	case unix.AF_INET6:
+		var inet6Addr unix.RawSockaddrInet6
+
+		famBuf = bytes.NewBuffer(socketaddr)
+		if err := binary.Read(famBuf, binary.BigEndian, &inet6Addr); err != nil {
+			return FullAddress{}, unix.EFAULT
+		}
+
+		ip := net.IP(inet6Addr.Addr[:])
+		out := FullAddress{
+			Addr: ip.String(),
+			Port: inet6Addr.Port,
+		}
+
+		// if isLinkLocal(out.Addr) {
+		//			out.NIC = NICID(a.Scope_id)
+		//}
+
+		if out.Addr == strings.Repeat(nullByte, 16) {
+			out.Addr = ""
+		}
+
+		return out, nil
+
+	default:
+		return FullAddress{}, unix.ENOTSUP
+	}
 }
 
 // Kill the application in case of a proxy leak.
@@ -349,4 +407,8 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	fmt.Println(conn) //nolint
 
 	return nil
+}
+
+func (i FullAddress) String() string {
+	return fmt.Sprintf("%s:%d", i.Addr, i.Port)
 }
