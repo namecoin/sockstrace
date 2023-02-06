@@ -119,7 +119,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	// Parse the IP and Port.
 	address, err := ParseAddress(task, record.Syscall.Args)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse address: %w", err)
 	}
 
 	IPPort := address.String()
@@ -136,11 +136,11 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 		}
 		if cfg.Redirect {
 			err := RedirectConns(record.Syscall.Args, cfg, record)
-			return err
+			return fmt.Errorf("failed to redirect connections: %w", err)
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to block syscall for PID %d and IPPort %s: %w", record.PID, IPPort, err)
 		}
 	}
 
@@ -301,31 +301,31 @@ func SetEnv(cfg Config) string {
 func BlockSyscall(pid int, ipport string) error {
 	// Trace the syscall
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return err
+		return fmt.Errorf("error while tracing syscall for process with PID %d: %v", pid, err)
 	}
 
 	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return err
+		return fmt.Errorf("error while waiting for process with PID %d: %v", pid, err)
 	}
 
 	// Struct to store the current register values from unix.PtraceGetRegs
 	regs := &unix.PtraceRegs{}
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
-		return err
+		return fmt.Errorf("error while getting register values from process with PID %d: %v", pid, err)
 	}
 
 	// Set to invalid syscall and set the new register values
 	regs.Rax = math.MaxUint64
 	if err := unix.PtraceSetRegs(pid, regs); err != nil {
-		return err
+		return fmt.Errorf("error while setting register values for process with PID %d: %v", pid, err)
 	}
 
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return err
+		return fmt.Errorf("error while tracing syscall for process with PID %d: %v", pid, err)
 	}
 
 	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return err
+		return fmt.Errorf("error while waiting for process with PID %d: %v", pid, err)
 	}
 
 	fmt.Printf("Blocking -> %v\n", ipport) //nolint
@@ -375,7 +375,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 
 	// Poking our proxy IP/Port to the address containing the original address
 	if _, err := unix.PtracePokeData(record.PID, uintptr(addr), pokeData); err != nil {
-		return err
+		return fmt.Errorf("error poking data into process with PID %d: %v", record.PID, err)
 	}
 
 	fmt.Printf("Connecting to %v\n", cfg.SocksTCP) //nolint
@@ -388,19 +388,19 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 	p, err := pidfd.Open(record.PID, 0)
 	if err != nil {
-		return err
+		return fmt.Errorf("error opening PID file descriptor: %v\n", err)
 	}
 
 	listenfd, err := p.GetFd(int(fd), 0)
 	if err != nil {
-		return err
+		return fmt.Errorf("error getting listen file descriptor: %v\n", err)
 	}
 
 	file := os.NewFile(uintptr(listenfd), "")
 
 	conn, err := net.FileConn(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("error creating connection from file: %v\n", err)
 	}
 
 	// For Debugging purposes
