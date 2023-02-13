@@ -397,7 +397,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
 	addr, _ := exit_addr.LoadAndDelete("Address")
 	IPPort := fmt.Sprintf("%d",addr)
-
+	fmt.Println(addr,IPPort)
 	fd := record.Syscall.Args[0].Uint()
 
 	p, err := pidfd.Open(record.PID, 0)
