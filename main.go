@@ -37,6 +37,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -47,6 +48,7 @@ import (
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
+	"github.com/robertmin1/socks5/v4"
 )
 
 var (
@@ -54,6 +56,8 @@ var (
 	UDPProtolNum byte = 0x11
 	nullByte          = "\x00"
 )
+
+var exit_addr sync.Map
 
 // Config is a struct to store the program's configuration values.
 type Config struct {
@@ -103,8 +107,9 @@ func main() {
 				return err
 			}
 		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
-			if cfg.Redirect {
-				if err := Socksify(record.Syscall.Args, record, t); err != nil {
+			_, ok := exit_addr.Load("Address")
+			if cfg.Redirect && ok {
+				if err := Socksify(record.Syscall.Args, record, t, cfg); err != nil {
 					return err
 				}
 			}
@@ -135,8 +140,12 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return nil
 		}
 		if cfg.Redirect {
+			exit_addr.Store("Address", IPPort)
+			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
-			return fmt.Errorf("failed to redirect connections: %w", err)
+			if err != nil {
+				return fmt.Errorf("failed to redirect connections: %w", err)
+			}
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
@@ -383,7 +392,10 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 	return nil
 }
 
-func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task) error {
+func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
+	addr, _ := exit_addr.LoadAndDelete("Address")
+	IPPort := fmt.Sprintf("%d",addr)
+
 	fd := record.Syscall.Args[0].Uint()
 
 	p, err := pidfd.Open(record.PID, 0)
@@ -403,8 +415,15 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		return fmt.Errorf("error creating connection from file: %v\n", err)
 	}
 
-	// For Debugging purposes
-	fmt.Println(conn) //nolint
+	cl, err := socks5.NewClient(IPPort, cfg.Proxyusr, cfg.Proxypas, 10, 10)
+	if err != nil {
+		return err
+	}
+
+	_, err = cl.Dial("tcp", IPPort, conn)
+	if err != nil {
+		return fmt.Errorf("an error occured while running dial : %w", err)
+	}
 
 	return nil
 }
