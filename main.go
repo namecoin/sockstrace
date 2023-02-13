@@ -146,6 +146,8 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
+
+			return nil
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
