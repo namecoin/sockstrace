@@ -102,11 +102,15 @@ func main() {
 		cfg.SocksTCP = SetEnv(cfg)
 	}
 
-	err := GenerateRandomHexCredentials(cfg)
-	if err != nil {
-		panic(err)
-	}
+	if cfg.Redirect {
+		usr, pass, err := GenerateRandomHexCredentials(cfg)
+		if err != nil {
+			panic(err)
+		}
 
+		cfg.Proxyusr = usr
+		cfg.Proxypas = pass 
+	}
 	// Start the program with tracing and handle the CONNECT system call events.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
@@ -450,9 +454,9 @@ func (i FullAddress) String() string {
 	}
 }
 
-func GenerateRandomHexCredentials(cfg Config) (error) {
+func GenerateRandomHexCredentials(cfg Config) (string, string, error) {
 	if cfg.Proxyusr != "" && cfg.Proxypas != "" {
-		return nil
+		return cfg.Proxyusr, cfg.Proxypas, nil
 	}
 
 	// Create byte slices to hold the random data
@@ -462,17 +466,17 @@ func GenerateRandomHexCredentials(cfg Config) (error) {
 	// Generate random data and store it in the byte slices
 	_, err := rand.Read(usernameBytes)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 
 	_, err = rand.Read(passwordBytes)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 
 	// Encode the random data as hex strings
-	cfg.Proxyusr = hex.EncodeToString(usernameBytes)
-	cfg.Proxypas = hex.EncodeToString(passwordBytes)
+	username := hex.EncodeToString(usernameBytes)
+	password := hex.EncodeToString(passwordBytes)
 
-	return nil
+	return username, password, nil
 }
