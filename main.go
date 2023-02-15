@@ -28,7 +28,9 @@ import "C"
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -44,11 +46,11 @@ import (
 	"github.com/hlandau/dexlogconfig"
 	"github.com/hlandau/xlog"
 	"github.com/oraoto/go-pidfd"
+	"github.com/robertmin1/socks5/v4"
 	"github.com/u-root/u-root/pkg/strace"
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
-	"github.com/robertmin1/socks5/v4"
 )
 
 var (
@@ -98,6 +100,11 @@ func main() {
 
 	if cfg.EnvVar {
 		cfg.SocksTCP = SetEnv(cfg)
+	}
+
+	err := GenerateRandomHexCredentials(cfg)
+	if err != nil {
+		panic(err)
 	}
 
 	// Start the program with tracing and handle the CONNECT system call events.
@@ -431,5 +438,41 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 }
 
 func (i FullAddress) String() string {
-	return fmt.Sprintf("%s:%d", i.Addr, i.Port)
+	parsedhost := net.ParseIP(i.Addr)
+
+	switch {
+	case parsedhost.To4() != nil:
+		return fmt.Sprintf("%s:%d", i.Addr, i.Port)
+	case parsedhost.To16() != nil:
+		return fmt.Sprintf("[%s]:%d", i.Addr, i.Port)
+	default:
+		return fmt.Sprintf("%s", i.Addr)
+	}
+}
+
+func GenerateRandomHexCredentials(cfg Config) (error) {
+	if cfg.Proxyusr != "" && cfg.Proxypas != "" {
+		return nil
+	}
+
+	// Create byte slices to hold the random data
+	usernameBytes := make([]byte, 48)
+	passwordBytes := make([]byte, 48)
+
+	// Generate random data and store it in the byte slices
+	_, err := rand.Read(usernameBytes)
+	if err != nil {
+		return err
+	}
+
+	_, err = rand.Read(passwordBytes)
+	if err != nil {
+		return err
+	}
+
+	// Encode the random data as hex strings
+	cfg.Proxyusr = hex.EncodeToString(usernameBytes)
+	cfg.Proxypas = hex.EncodeToString(passwordBytes)
+
+	return nil
 }
