@@ -163,6 +163,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			}
 
 			return nil
+
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
@@ -337,12 +338,14 @@ func BlockSyscall(pid int, ipport string) error {
 	// Struct to store the current register values from unix.PtraceGetRegs
 	regs := &unix.PtraceRegs{}
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
+
 		return fmt.Errorf("error while getting register values from process with PID %d: %v", pid, err)
 	}
 
 	// Set to invalid syscall and set the new register values
 	regs.Rax = math.MaxUint64
 	if err := unix.PtraceSetRegs(pid, regs); err != nil {
+
 		return fmt.Errorf("error while setting register values for process with PID %d: %v", pid, err)
 	}
 
@@ -445,6 +448,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 	conn, err := net.FileConn(file)
 	if err != nil {
+
 		return fmt.Errorf("error creating connection from file: %v\n", err)
 	}
 
