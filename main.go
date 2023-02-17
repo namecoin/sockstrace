@@ -122,7 +122,7 @@ func main() {
 				return err
 			}
 		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
-			_, ok := exit_addr.Load("Address")
+			_, ok := exit_addr.Load(record.PID)
 			if cfg.Redirect && ok {
 				if err := Socksify(record.Syscall.Args, record, t, cfg); err != nil {
 					return err
@@ -155,7 +155,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return nil
 		}
 		if cfg.Redirect {
-			exit_addr.Store("Address", IPPort)
+			exit_addr.Store(record.PID, IPPort)
 			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
@@ -426,7 +426,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	}
 
 
-	addr, _ := exit_addr.LoadAndDelete("Address")
+	addr, _ := exit_addr.LoadAndDelete(record.PID)
 	IPPort := fmt.Sprintf("%v",addr)
 	fmt.Println(addr,IPPort)
 	fd := record.Syscall.Args[0].Uint()
