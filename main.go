@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	math_rand "math/rand"
 	"math"
 	"net"
 	"os"
@@ -42,6 +43,7 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+	"time"
 
 	"github.com/hlandau/dexlogconfig"
 	"github.com/hlandau/xlog"
@@ -59,6 +61,11 @@ var (
 	nullByte          = "\x00"
 )
 
+var authData []struct {
+    username string
+    password string
+}
+
 var exit_addr sync.Map
 
 // Config is a struct to store the program's configuration values.
@@ -72,6 +79,7 @@ type Config struct {
 	Redirect bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
 	Proxyusr string   `default:"" usage:"Proxy username in case of proxy redirection"`
 	Proxypas string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	P2psocks bool	  `default:"false" usage:"Enable random SOCKS behavior"`
 }
 
 // FullAddress is the network address and port
@@ -103,14 +111,10 @@ func main() {
 	}
 
 	if cfg.Redirect {
-		usr, pass, err := GenerateRandomHexCredentials(cfg)
-		if err != nil {
-			panic(err)
-		}
-
-		cfg.Proxyusr = usr
-		cfg.Proxypas = pass 
+		cfg.Proxyusr, _ = GenerateRandomCredentials()
+		cfg.Proxypas, _ = GenerateRandomCredentials() 
 	}
+
 	// Start the program with tracing and handle the CONNECT system call events.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
@@ -406,6 +410,22 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 }
 
 func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
+	if cfg.P2psocks {
+		// initialize authData
+		initializeAuthData()
+
+		// set up random number generator
+		math_rand.Seed(time.Now().UnixNano())
+
+		// generate random index
+		idx := math_rand.Intn(len(authData))
+
+		// get random auth data
+		cfg.Proxyusr = authData[idx].username
+		cfg.Proxypas = authData[idx].password
+	}
+
+
 	addr, _ := exit_addr.LoadAndDelete("Address")
 	IPPort := fmt.Sprintf("%v",addr)
 	fmt.Println(addr,IPPort)
@@ -454,29 +474,21 @@ func (i FullAddress) String() string {
 	}
 }
 
-func GenerateRandomHexCredentials(cfg Config) (string, string, error) {
-	if cfg.Proxyusr != "" && cfg.Proxypas != "" {
-		return cfg.Proxyusr, cfg.Proxypas, nil
-	}
+func GenerateRandomCredentials() (string, error) {
+    bytes := make([]byte, 48)
+    if _, err := rand.Read(bytes); err != nil {
+        return "", err
+    }
+    return hex.EncodeToString(bytes), nil
+}
 
-	// Create byte slices to hold the random data
-	usernameBytes := make([]byte, 48)
-	passwordBytes := make([]byte, 48)
-
-	// Generate random data and store it in the byte slices
-	_, err := rand.Read(usernameBytes)
-	if err != nil {
-		return "", "", err
-	}
-
-	_, err = rand.Read(passwordBytes)
-	if err != nil {
-		return "", "", err
-	}
-
-	// Encode the random data as hex strings
-	username := hex.EncodeToString(usernameBytes)
-	password := hex.EncodeToString(passwordBytes)
-
-	return username, password, nil
+func initializeAuthData() {
+    for i := 0; i < 10; i++ {
+        username, _ := GenerateRandomCredentials()
+        password, _ := GenerateRandomCredentials()
+        authData = append(authData, struct {
+            username string
+            password string
+        }{username, password})
+    }
 }
