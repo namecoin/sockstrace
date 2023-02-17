@@ -28,21 +28,27 @@ import "C"
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	math_rand "math/rand"
 	"math"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
+	"time"
 
 	"github.com/hlandau/dexlogconfig"
 	"github.com/hlandau/xlog"
 	"github.com/oraoto/go-pidfd"
+	"github.com/robertmin1/socks5/v4"
 	"github.com/u-root/u-root/pkg/strace"
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
@@ -55,6 +61,13 @@ var (
 	nullByte          = "\x00"
 )
 
+var authData []struct {
+    username string
+    password string
+}
+
+var exit_addr sync.Map
+
 // Config is a struct to store the program's configuration values.
 type Config struct {
 	Program  string   `usage:"Program Name"`
@@ -66,6 +79,7 @@ type Config struct {
 	Redirect bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
 	Proxyusr string   `default:"" usage:"Proxy username in case of proxy redirection"`
 	Proxypas string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	P2psocks bool	  `default:"false" usage:"Enable random SOCKS behavior"`
 }
 
 // FullAddress is the network address and port
@@ -96,6 +110,11 @@ func main() {
 		cfg.SocksTCP = SetEnv(cfg)
 	}
 
+	if cfg.Redirect {
+		cfg.Proxyusr, _ = GenerateRandomCredentials()
+		cfg.Proxypas, _ = GenerateRandomCredentials() 
+	}
+
 	// Start the program with tracing and handle the CONNECT system call events.
 	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
@@ -103,8 +122,9 @@ func main() {
 				return err
 			}
 		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
-			if cfg.Redirect {
-				if err := Socksify(record.Syscall.Args, record, t); err != nil {
+			_, ok := exit_addr.Load("Address")
+			if cfg.Redirect && ok {
+				if err := Socksify(record.Syscall.Args, record, t, cfg); err != nil {
 					return err
 				}
 			}
@@ -135,8 +155,14 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return nil
 		}
 		if cfg.Redirect {
+			exit_addr.Store("Address", IPPort)
+			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
-			return fmt.Errorf("failed to redirect connections: %w", err)
+			if err != nil {
+				return fmt.Errorf("failed to redirect connections: %w", err)
+			}
+
+			return nil
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
@@ -184,7 +210,7 @@ func eventName(r *strace.TraceRecord) (string, error) { //nolint
 
 // ParseAddress reads an sockaddr struct from the given address and converts it
 // to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
-// addresses.
+// addresses
 func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
@@ -383,7 +409,26 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 	return nil
 }
 
-func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task) error {
+func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
+	if cfg.P2psocks {
+		// initialize authData
+		initializeAuthData()
+
+		// set up random number generator
+		math_rand.Seed(time.Now().UnixNano())
+
+		// generate random index
+		idx := math_rand.Intn(len(authData))
+
+		// get random auth data
+		cfg.Proxyusr = authData[idx].username
+		cfg.Proxypas = authData[idx].password
+	}
+
+
+	addr, _ := exit_addr.LoadAndDelete("Address")
+	IPPort := fmt.Sprintf("%v",addr)
+	fmt.Println(addr,IPPort)
 	fd := record.Syscall.Args[0].Uint()
 
 	p, err := pidfd.Open(record.PID, 0)
@@ -403,12 +448,47 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		return fmt.Errorf("error creating connection from file: %v\n", err)
 	}
 
-	// For Debugging purposes
-	fmt.Println(conn) //nolint
+	cl, err := socks5.NewClient(IPPort, cfg.Proxyusr, cfg.Proxypas, 10, 10)
+	if err != nil {
+		return err
+	}
+
+	_, err = cl.Dial("tcp", IPPort, conn)
+	if err != nil {
+		return fmt.Errorf("an error occured while running dial : %w", err)
+	}
 
 	return nil
 }
 
 func (i FullAddress) String() string {
-	return fmt.Sprintf("%s:%d", i.Addr, i.Port)
+	parsedhost := net.ParseIP(i.Addr)
+
+	switch {
+	case parsedhost.To4() != nil:
+		return fmt.Sprintf("%s:%d", i.Addr, i.Port)
+	case parsedhost.To16() != nil:
+		return fmt.Sprintf("[%s]:%d", i.Addr, i.Port)
+	default:
+		return fmt.Sprintf("%s", i.Addr)
+	}
+}
+
+func GenerateRandomCredentials() (string, error) {
+    bytes := make([]byte, 48)
+    if _, err := rand.Read(bytes); err != nil {
+        return "", err
+    }
+    return hex.EncodeToString(bytes), nil
+}
+
+func initializeAuthData() {
+    for i := 0; i < 10; i++ {
+        username, _ := GenerateRandomCredentials()
+        password, _ := GenerateRandomCredentials()
+        authData = append(authData, struct {
+            username string
+            password string
+        }{username, password})
+    }
 }
