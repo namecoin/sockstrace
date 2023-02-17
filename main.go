@@ -210,7 +210,7 @@ func eventName(r *strace.TraceRecord) (string, error) { //nolint
 
 // ParseAddress reads an sockaddr struct from the given address and converts it
 // to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
-// addresses.
+// addresses
 func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
