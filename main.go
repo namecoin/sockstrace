@@ -33,8 +33,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	math_rand "math/rand"
 	"math"
+	math_rand "math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -42,8 +42,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"unsafe"
 	"time"
+	"unsafe"
 
 	"github.com/hlandau/dexlogconfig"
 	"github.com/hlandau/xlog"
@@ -62,24 +62,24 @@ var (
 )
 
 var authData []struct {
-    username string
-    password string
+	username string
+	password string
 }
 
 var exit_addr sync.Map
 
 // Config is a struct to store the program's configuration values.
 type Config struct {
-	Program  string   `usage:"Program Name"`
-	SocksTCP string   `default:"127.0.0.1:9050"`
-	Args     []string `usage:"Program Arguments"`
-	KillProg bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
-	LogLeaks bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
-	EnvVar   bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
-	Redirect bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
-	Proxyusr string   `default:"" usage:"Proxy username in case of proxy redirection"`
-	Proxypas string   `default:"" usage:"Proxy password in case of proxy redirection"`
-	P2psocks bool	  `default:"false" usage:"Enable random SOCKS behavior"`
+	Program     string   `usage:"Program Name"`
+	SocksTCP    string   `default:"127.0.0.1:9050"`
+	Args        []string `usage:"Program Arguments"`
+	KillProg    bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
+	LogLeaks    bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
+	EnvVar      bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
+	Redirect    bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
+	Proxyusr    string   `default:"" usage:"Proxy username in case of proxy redirection"`
+	Proxypas    string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	One_circuit bool     `default:"false" usage:"Disable random SOCKS behavior"`
 }
 
 // FullAddress is the network address and port
@@ -112,7 +112,7 @@ func main() {
 
 	if cfg.Redirect {
 		cfg.Proxyusr, _ = GenerateRandomCredentials()
-		cfg.Proxypas, _ = GenerateRandomCredentials() 
+		cfg.Proxypas, _ = GenerateRandomCredentials()
 	}
 
 	// Start the program with tracing and handle the CONNECT system call events.
@@ -410,7 +410,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 }
 
 func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
-	if cfg.P2psocks {
+	if !cfg.One_circuit {
 		// initialize authData
 		initializeAuthData()
 
@@ -425,10 +425,9 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		cfg.Proxypas = authData[idx].password
 	}
 
-
 	addr, _ := exit_addr.LoadAndDelete(record.PID)
-	IPPort := fmt.Sprintf("%v",addr)
-	fmt.Println(addr,IPPort)
+	IPPort := fmt.Sprintf("%v", addr)
+	fmt.Println(addr, IPPort)
 	fd := record.Syscall.Args[0].Uint()
 
 	p, err := pidfd.Open(record.PID, 0)
@@ -475,20 +474,20 @@ func (i FullAddress) String() string {
 }
 
 func GenerateRandomCredentials() (string, error) {
-    bytes := make([]byte, 48)
-    if _, err := rand.Read(bytes); err != nil {
-        return "", err
-    }
-    return hex.EncodeToString(bytes), nil
+	bytes := make([]byte, 48)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 func initializeAuthData() {
-    for i := 0; i < 10; i++ {
-        username, _ := GenerateRandomCredentials()
-        password, _ := GenerateRandomCredentials()
-        authData = append(authData, struct {
-            username string
-            password string
-        }{username, password})
-    }
+	for i := 0; i < 10; i++ {
+		username, _ := GenerateRandomCredentials()
+		password, _ := GenerateRandomCredentials()
+		authData = append(authData, struct {
+			username string
+			password string
+		}{username, password})
+	}
 }
