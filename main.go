@@ -77,8 +77,8 @@ type Config struct {
 	LogLeaks    bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
 	EnvVar      bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
 	Redirect    bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
-	Proxyusr    string   `default:"" usage:"Proxy username in case of proxy redirection"`
-	Proxypas    string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	Proxyuser    string   `default:"" usage:"Proxy username in case of proxy redirection"`
+	Proxypass    string   `default:"" usage:"Proxy password in case of proxy redirection"`
 	One_circuit bool     `default:"false" usage:"Disable random SOCKS behavior"`
 }
 
@@ -102,6 +102,8 @@ func main() {
 
 	config.ParseFatal(&cfg)
 	dexlogconfig.Init()
+	// initialize authData
+	initializeAuthData()
 	// Create a new command struct for the specific program and arguments
 	program := exec.Command(cfg.Program, cfg.Args...)
 	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -110,9 +112,19 @@ func main() {
 		cfg.SocksTCP = SetEnv(cfg)
 	}
 
-	if cfg.Redirect {
-		cfg.Proxyusr, _ = GenerateRandomCredentials()
-		cfg.Proxypas, _ = GenerateRandomCredentials()
+	if cfg.Proxyuser == "" || cfg.Proxypass == "" {
+		username, err := GenerateRandomCredentials()
+		if err != nil {
+			panic(err)
+		}
+
+		password, err := GenerateRandomCredentials()
+		if err != nil {
+			panic(err)
+		}
+
+		cfg.Proxyuser = username
+		cfg.Proxypass = password
 	}
 
 	// Start the program with tracing and handle the CONNECT system call events.
@@ -410,19 +422,18 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 }
 
 func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
+	username, password := cfg.Proxyuser, cfg.Proxypass
 	if !cfg.One_circuit {
-		// initialize authData
-		initializeAuthData()
-
-		// set up random number generator
-		math_rand.Seed(time.Now().UnixNano())
-
 		// generate random index
-		idx := math_rand.Intn(len(authData))
+		idxBytes := make([]byte, 1)
+		if _, err := rand.Read(idxBytes); err != nil {
+			panic(err)
+		}
 
+		idx := int(idxBytes[0]) % len(authData)
 		// get random auth data
-		cfg.Proxyusr = authData[idx].username
-		cfg.Proxypas = authData[idx].password
+		username = authData[idx].username
+		password = authData[idx].password
 	}
 
 	addr, _ := exit_addr.LoadAndDelete(record.PID)
@@ -447,7 +458,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		return fmt.Errorf("error creating connection from file: %v\n", err)
 	}
 
-	cl, err := socks5.NewClient(IPPort, cfg.Proxyusr, cfg.Proxypas, 10, 10)
+	cl, err := socks5.NewClient(IPPort, username, password, 10, 10)
 	if err != nil {
 		return err
 	}
