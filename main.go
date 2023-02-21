@@ -34,7 +34,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	math_rand "math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -42,7 +41,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/hlandau/dexlogconfig"
