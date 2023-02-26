@@ -34,7 +34,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	math_rand "math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -42,7 +41,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/hlandau/dexlogconfig"
@@ -76,9 +74,9 @@ type Config struct {
 	KillProg    bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
 	LogLeaks    bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
 	EnvVar      bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
-	Redirect    bool     `default:"false" usage:"Incase of leak redirect to the desired proxy (bool)"`
-	Proxyusr    string   `default:"" usage:"Proxy username in case of proxy redirection"`
-	Proxypas    string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	Redirect    string     `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
+	Proxyuser    string   `default:"" usage:"Proxy username in case of proxy redirection"`
+	Proxypass    string   `default:"" usage:"Proxy password in case of proxy redirection"`
 	One_circuit bool     `default:"false" usage:"Disable random SOCKS behavior"`
 }
 
@@ -102,6 +100,8 @@ func main() {
 
 	config.ParseFatal(&cfg)
 	dexlogconfig.Init()
+	// initialize authData
+	initializeAuthData()
 	// Create a new command struct for the specific program and arguments
 	program := exec.Command(cfg.Program, cfg.Args...)
 	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -110,9 +110,19 @@ func main() {
 		cfg.SocksTCP = SetEnv(cfg)
 	}
 
-	if cfg.Redirect {
-		cfg.Proxyusr, _ = GenerateRandomCredentials()
-		cfg.Proxypas, _ = GenerateRandomCredentials()
+	if cfg.Proxyuser == "" || cfg.Proxypass == "" {
+		username, err := GenerateRandomCredentials()
+		if err != nil {
+			panic(err)
+		}
+
+		password, err := GenerateRandomCredentials()
+		if err != nil {
+			panic(err)
+		}
+
+		cfg.Proxyuser = username
+		cfg.Proxypass = password
 	}
 
 	// Start the program with tracing and handle the CONNECT system call events.
@@ -123,7 +133,7 @@ func main() {
 			}
 		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
 			_, ok := exit_addr.Load(record.PID)
-			if cfg.Redirect && ok {
+			if ok {
 				if err := Socksify(record.Syscall.Args, record, t, cfg); err != nil {
 					return err
 				}
@@ -154,15 +164,25 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			KillApp(program, IPPort)
 			return nil
 		}
-		if cfg.Redirect {
+		if cfg.Redirect != "" {
+		switch cfg.Redirect {
+		case "socks5":
 			exit_addr.Store(record.PID, IPPort)
 			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
-
 			return nil
+			
+		case "http":
+			// TODO
+		
+		case "trans":
+			// TODO		
+		}
+		// TODO: handle invalid flag	
+		
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
@@ -410,52 +430,61 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 }
 
 func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
+	username, password := cfg.Proxyuser, cfg.Proxypass
 	if !cfg.One_circuit {
-		// initialize authData
-		initializeAuthData()
-
-		// set up random number generator
-		math_rand.Seed(time.Now().UnixNano())
-
 		// generate random index
-		idx := math_rand.Intn(len(authData))
+		idxBytes := make([]byte, 1)
+		if _, err := rand.Read(idxBytes); err != nil {
+			panic(err)
+		}
 
+		idx := int(idxBytes[0]) % len(authData)
 		// get random auth data
-		cfg.Proxyusr = authData[idx].username
-		cfg.Proxypas = authData[idx].password
+		username = authData[idx].username
+		password = authData[idx].password
 	}
 
 	addr, _ := exit_addr.LoadAndDelete(record.PID)
 	IPPort := fmt.Sprintf("%v", addr)
-	fmt.Println(addr, IPPort)
-	fd := record.Syscall.Args[0].Uint()
+	
+	switch cfg.Redirect {
+	case "socks5":
+		fd := record.Syscall.Args[0].Uint()
 
-	p, err := pidfd.Open(record.PID, 0)
-	if err != nil {
-		return fmt.Errorf("error opening PID file descriptor: %v\n", err)
+		p, err := pidfd.Open(record.PID, 0)
+		if err != nil {
+			return fmt.Errorf("error opening PID file descriptor: %v\n", err)
+		}
+
+		listenfd, err := p.GetFd(int(fd), 0)
+		if err != nil {
+			return fmt.Errorf("error getting listen file descriptor: %v\n", err)
+		}
+
+		file := os.NewFile(uintptr(listenfd), "")
+
+		conn, err := net.FileConn(file)
+		if err != nil {
+			return fmt.Errorf("error creating connection from file: %v\n", err)
+		}
+
+		cl, err := socks5.NewClient(IPPort, username, password, 10, 10)
+		if err != nil {
+			return err
+		}
+
+		_, err = cl.Dial("tcp", IPPort, conn)
+		if err != nil {
+			return fmt.Errorf("an error occured while running dial : %w", err)
+		}
+	
+	case "http":
+		// TODO
+	
+	case "trans":
+		// TODO		
 	}
-
-	listenfd, err := p.GetFd(int(fd), 0)
-	if err != nil {
-		return fmt.Errorf("error getting listen file descriptor: %v\n", err)
-	}
-
-	file := os.NewFile(uintptr(listenfd), "")
-
-	conn, err := net.FileConn(file)
-	if err != nil {
-		return fmt.Errorf("error creating connection from file: %v\n", err)
-	}
-
-	cl, err := socks5.NewClient(IPPort, cfg.Proxyusr, cfg.Proxypas, 10, 10)
-	if err != nil {
-		return err
-	}
-
-	_, err = cl.Dial("tcp", IPPort, conn)
-	if err != nil {
-		return fmt.Errorf("an error occured while running dial : %w", err)
-	}
+	
 
 	return nil
 }
