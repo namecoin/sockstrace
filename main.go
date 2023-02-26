@@ -133,7 +133,7 @@ func main() {
 			}
 		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
 			_, ok := exit_addr.Load(record.PID)
-			if cfg.Redirect && ok {
+			if ok {
 				if err := Socksify(record.Syscall.Args, record, t, cfg); err != nil {
 					return err
 				}
@@ -164,15 +164,25 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			KillApp(program, IPPort)
 			return nil
 		}
-		if cfg.Redirect {
+		if cfg.Redirect != "" {
+		switch cfg.Redirect {
+		case "socks5":
 			exit_addr.Store(record.PID, IPPort)
 			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
-
 			return nil
+			
+		case "http":
+			// TODO
+		
+		case "trans":
+			// TODO		
+		}
+		// TODO: handle invalid flag	
+		
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
