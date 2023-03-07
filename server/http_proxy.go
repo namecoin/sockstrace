@@ -10,9 +10,9 @@ import (
 )
 
 type HttpDialer struct {
-	host	string
-	username string
-	password string
+	Host	string
+	Username string
+	Password string
 }
 
 func (h *HttpDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, error) {

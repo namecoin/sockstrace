@@ -51,7 +51,7 @@ import (
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
-	"github.com/robertmin1/heteronculous-horklump/server"
+	"github.com/robertmin1/test/server"
 )
 
 var (
@@ -481,7 +481,11 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	
 	case "http":
 		// TODO
-	
+		c := server.HttpDialer{
+			Host: "3443",
+
+		}
+		a :=  c.Password
 	case "trans":
 		// TODO		
 	}
