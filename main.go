@@ -166,8 +166,6 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return nil
 		}
 		if cfg.Redirect != "" {
-		switch cfg.Redirect {
-		case "socks5":
 			exit_addr.Store(record.PID, IPPort)
 			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
@@ -175,22 +173,10 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
 			return nil
-			
-		case "http":
-			exit_addr.Store(record.PID, IPPort)
-			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
-			err := RedirectConns(record.Syscall.Args, cfg, record)
-			if err != nil {
-				return fmt.Errorf("failed to redirect connections: %w", err)
-			}
-			return nil
-		
-		case "trans":
-			// TODO		
+		// TODO: handle invalid flag
+		// Incase trans proxy will require a different implementation a switch will be used.	
 		}
-		// TODO: handle invalid flag	
-		
-		}
+
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
 			return fmt.Errorf("failed to block syscall for PID %d and IPPort %s: %w", record.PID, IPPort, err)
@@ -453,28 +439,27 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 	addr, _ := exit_addr.LoadAndDelete(record.PID)
 	IPPort := fmt.Sprintf("%v", addr)
-	
+	fd := record.Syscall.Args[0].Uint()
+
+	p, err := pidfd.Open(record.PID, 0)
+	if err != nil {
+		return fmt.Errorf("error opening PID file descriptor: %v\n", err)
+	}
+
+	listenfd, err := p.GetFd(int(fd), 0)
+	if err != nil {
+		return fmt.Errorf("error getting listen file descriptor: %v\n", err)
+	}
+
+	file := os.NewFile(uintptr(listenfd), "")
+
+	conn, err := net.FileConn(file)
+	if err != nil {
+		return fmt.Errorf("error creating connection from file: %v\n", err)
+	}
+
 	switch cfg.Redirect {
 	case "socks5":
-		fd := record.Syscall.Args[0].Uint()
-
-		p, err := pidfd.Open(record.PID, 0)
-		if err != nil {
-			return fmt.Errorf("error opening PID file descriptor: %v\n", err)
-		}
-
-		listenfd, err := p.GetFd(int(fd), 0)
-		if err != nil {
-			return fmt.Errorf("error getting listen file descriptor: %v\n", err)
-		}
-
-		file := os.NewFile(uintptr(listenfd), "")
-
-		conn, err := net.FileConn(file)
-		if err != nil {
-			return fmt.Errorf("error creating connection from file: %v\n", err)
-		}
-
 		cl, err := socks5.NewClient(IPPort, username, password, 10, 10)
 		if err != nil {
 			return err
@@ -486,11 +471,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		}
 	
 	case "http":
-		
-		c := http_proxy.HttpDialer{
-			Host: "127.0.0.1",
-		}
-		c.Host
+		cl := http_proxy.HttpDialer
 	case "trans":
 		// TODO		
 	}

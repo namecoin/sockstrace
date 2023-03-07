@@ -15,6 +15,16 @@ type HttpDialer struct {
 	Password string
 }
 
+// This is just create a client, you need to use Dial to create conn
+func NewClient(addr, username, password string) (*HttpDialer, error) {
+	c := &HttpDialer{
+		Host: addr,
+		Username: username,
+		Password: password,
+	}
+	return c, nil
+}
+
 func (h *HttpDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, error) {
 	conn := httpconn
 
@@ -52,3 +62,4 @@ func (h *HttpDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 	}
 	return conn, nil
 }
+
