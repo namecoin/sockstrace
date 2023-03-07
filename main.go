@@ -177,7 +177,13 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return nil
 			
 		case "http":
-			// TODO
+			exit_addr.Store(record.PID, IPPort)
+			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
+			err := RedirectConns(record.Syscall.Args, cfg, record)
+			if err != nil {
+				return fmt.Errorf("failed to redirect connections: %w", err)
+			}
+			return nil
 		
 		case "trans":
 			// TODO		
@@ -480,12 +486,11 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		}
 	
 	case "http":
-		// TODO
-		c := server.HttpDialer{
-			Host: "3443",
-
+		
+		c := http_proxy.HttpDialer{
+			Host: "127.0.0.1",
 		}
-		a :=  c.Password
+		c.Host
 	case "trans":
 		// TODO		
 	}
