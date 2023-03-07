@@ -471,8 +471,16 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		}
 	
 	case "http":
-		cl := http_proxy.HttpDialer{}
-		cl.Dial()
+		cl, err := http_proxy.NewClient(cfg.SocksTCP, username, password)
+		if err != nil {
+			return err
+		}
+
+		_, err = cl.Dial("tcp", IPPort, conn)
+		if err != nil {
+			return err
+		}
+		
 	case "trans":
 		// TODO		
 	}
