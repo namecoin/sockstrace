@@ -51,6 +51,7 @@ import (
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
+	"github.com/robertmin1/heteronculous-horklump/server"
 )
 
 var (
