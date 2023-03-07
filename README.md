@@ -19,9 +19,19 @@ go mod tidy
 
 
 ## DEMO
-Assume you are running the SOCKS5 proxy with the default IP address: "localhost:1080". Trace for proxy leaks and Socksify your connecitons by running:
+Assume you are running the SOCKS5 proxy with the default IP address: "localhost:9050". Trace for proxy leaks and Socksify your connecitons by running:
 ```
-./tracer -horklump.program wget -horklump.redirect http -horklump.args https://116.202.120.121 -horklump.args --no-check-certificate -horklump.args --header=Host:check.torproject.org 
+./tracer -horklump.program wget -horklump.args https://116.202.120.121 
+-horklump.args --no-check-certificate -horklump.args 
+--header=Host:check.torproject.org 
+```
+Since the default address is `localhost:9050` there is no need to set it.
+
+Assume you are running the tor HTTP proxy with the default IP address: "localhost:9080". Trace for proxy leaks and Socksify your connecitons by running:
+```
+./tracer -horklump.program wget -horklump.redirect http -horklump.sockstcp 
+127.0.0.1:9080 -horklump.args https://116.202.120.121 -horklump.args 
+--no-check-certificate -horklump.args --header=Host:check.torproject.org 
 ```
 
 ## Licence
