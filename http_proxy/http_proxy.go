@@ -1,4 +1,4 @@
-package http_proxy
+package http_prox
 
 import (
 	"fmt"
