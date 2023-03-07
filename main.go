@@ -471,7 +471,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		}
 	
 	case "http":
-		cl := http_proxy.NewClient
+		cl := http_proxy.HttpDialer{}
 	case "trans":
 		// TODO		
 	}
