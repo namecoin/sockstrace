@@ -1,6 +1,29 @@
 # heteronculous-horklump
 Go port of Heteronculous (ptrace-based proxy leak detector). Outreachy project.
 
+## Building
+Prerequisites:
+
+1. Ensure you have the Go tools installed.
+
+### Using Go build commands with Go modules
+1. Clone [heteronculous-horklump](https://github.com/namecoin/heteronculous-horklump) 
+
+2. Set up Go modules
+```
+go mod init github.com/namecoin/heteronculous-horklump
+go mod tidy
+```
+
+3. Install `heteronculous-horklump` using `go build -o tracer main.go`
+
+
+## DEMO
+Assume you are running the SOCKS5 proxy with the default IP address: "localhost:1080". Trace for proxy leaks and Socksify your connecitons by running:
+```
+./tracer -horklump.program wget -horklump.redirect http -horklump.args https://116.202.120.121 -horklump.args --no-check-certificate -horklump.args --header=Host:check.torproject.org 
+```
+
 ## Licence
 
 Copyright (C) 2022 Namecoin Developers.
@@ -19,12 +42,3 @@ You should have received a copy of the GNU General Public License
 along with heteronculous-horklump.  If not, see [https://www.gnu.org/licenses/](https://www.gnu.org/licenses/).
 
 Namecoin is produced independently from the Tor® anonymity software and carries no guarantee from The Tor Project about quality, suitability or anything else.
-
-### Testing example commands: 
-
-  curl --socks5 127.0.0.1:9050 https://www.google.com/
-  
-  nc -z -v 127.0.0.1 9050
-  
-  nc -z -v -u 127.0.0.1 9050 (Testing redirection of connection to a UDP server. Setting of Host and Port was done using env variables [UDP Server](https://github.com/robertmin1/UDP-Server) )
-
