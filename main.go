@@ -51,7 +51,7 @@ import (
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
-	"github.com/robertmin1/heteronculous-horklump/http_prox"
+	"github.com/robertmin1/heteronculous-horklump/http_proxy"
 )
 
 var (
@@ -472,6 +472,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	
 	case "http":
 		cl := http_proxy.HttpDialer{}
+		cl.Dial()
 	case "trans":
 		// TODO		
 	}
