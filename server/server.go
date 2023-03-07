@@ -32,7 +32,7 @@ func (h *HttpDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 	}
 	
 	// Set authentication details.
-	req.SetBasicAuth(h.username, h.password)
+	req.SetBasicAuth(h.Username, h.Password)
 	err = req.Write(conn)
 	if err != nil {
 		conn.Close()
