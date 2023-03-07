@@ -480,7 +480,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		if err != nil {
 			return err
 		}
-		
+
 	case "trans":
 		// TODO		
 	}
