@@ -154,7 +154,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	}
 
 	IPPort := address.String()
-	if IPPort == cfg.SocksTCP { //nolint
+	if IPPort == cfg.SocksTCP || IPPort == "/var/run/nscd/socket"{ //nolint
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
 	} else {
 		if cfg.LogLeaks {
