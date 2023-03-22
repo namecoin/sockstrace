@@ -25,8 +25,8 @@ func NewClient(addr, username, password string) (*HTTPDialer, error) {
 	return c, nil
 }
 
-func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, error) {	//nolint
-	conn := httpconn 
+func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, error) { //nolint
+	conn := httpconn
 
 	reqURL, err := url.Parse("http://" + addr)
 	if err != nil {
@@ -35,7 +35,7 @@ func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 	}
 
 	req := &http.Request{
-		Method: "CONNECT",
+		Method: http.MethodConnect,
 		URL:    reqURL,
 		Host:   addr,
 		Header: make(http.Header),
@@ -60,7 +60,7 @@ func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 
 	resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		conn.Close()
 		return nil, fmt.Errorf("connect proxy error: %v", strings.SplitN(resp.Status, " ", 2)[1])
 	}
