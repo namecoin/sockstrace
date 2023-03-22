@@ -68,7 +68,7 @@ var authData []struct {
 var exitAddr sync.Map
 
 // Config is a struct to store the program's configuration values.
-type Config struct {
+type Config struct {	//nolint
 	Program    string   `usage:"Program Name"`
 	SocksTCP   string   `default:"127.0.0.1:9050"`
 	Args       []string `usage:"Program Arguments"`
@@ -414,7 +414,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 
 	// Poking our proxy IP/Port to the address containing the original address
 	if _, err := unix.PtracePokeData(record.PID, uintptr(addr), pokeData); err != nil {
-		return fmt.Errorf("error poking data into process with PID %d: %v", record.PID, err)
+		return fmt.Errorf("error poking data into process with PID %d: %w", record.PID, err)
 	}
 
 	fmt.Printf("Connecting to %v\n", cfg.SocksTCP) //nolint
@@ -442,19 +442,19 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 	p, err := pidfd.Open(record.PID, 0)
 	if err != nil {
-		return fmt.Errorf("error opening PID file descriptor: %v", err)
+		return fmt.Errorf("error opening PID file descriptor: %w", err)
 	}
 
 	listenfd, err := p.GetFd(int(fd), 0)
 	if err != nil {
-		return fmt.Errorf("error getting listen file descriptor: %v", err)
+		return fmt.Errorf("error getting listen file descriptor: %w", err)
 	}
 
 	file := os.NewFile(uintptr(listenfd), "")
 
 	conn, err := net.FileConn(file)
 	if err != nil {
-		return fmt.Errorf("error creating connection from file: %v", err)
+		return fmt.Errorf("error creating connection from file: %w", err)
 	}
 
 	switch cfg.Redirect {
@@ -479,8 +479,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		if err != nil {
 			return err
 		}
-
-	case "trans": // TODO
+		// TODO : Add more proxy support
 	}
 
 	return nil
