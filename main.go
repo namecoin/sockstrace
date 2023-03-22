@@ -480,7 +480,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 			return err
 		}
 	}
-	
+
 	return nil // Support more proxies
 }
 
