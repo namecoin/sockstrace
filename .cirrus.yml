@@ -4,6 +4,7 @@ task:
     image: golangci/golangci-lint:latest
   fetch_script:
     - go mod init github.com/"$CIRRUS_REPO_FULL_NAME"
+    - go get gopkg.in/hlandau/easyconfig.v1
     - go mod tidy
     - go generate ./...
     - go mod tidy
