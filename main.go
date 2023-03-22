@@ -480,7 +480,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 			return err
 		}
 	}
-	return nil	// Support more proxies
+	return nil // Support more proxies
 }
 
 func (i FullAddress) String() string {
