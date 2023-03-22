@@ -49,6 +49,6 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with heteronculous-horklump.  If not, see [https://www.gnu.org/licenses/](https://www.gnu.org/licenses/).
+along with heteronculous-horklump.  If not, see [https://www.gnu.org/licenses/](https://www.gnu.org/licenses/)
 
 Namecoin is produced independently from the Tor® anonymity software and carries no guarantee from The Tor Project about quality, suitability or anything else.

@@ -68,7 +68,7 @@ var authData []struct {
 var exitAddr sync.Map
 
 // Config is a struct to store the program's configuration values.
-type Config struct {	//nolint
+type Config struct { //nolint
 	Program    string   `usage:"Program Name"`
 	SocksTCP   string   `default:"127.0.0.1:9050"`
 	Args       []string `usage:"Program Arguments"`
@@ -479,10 +479,8 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		if err != nil {
 			return err
 		}
-		// TODO : Add more proxy support
 	}
-
-	return nil
+	return nil	// Support more proxies
 }
 
 func (i FullAddress) String() string {
