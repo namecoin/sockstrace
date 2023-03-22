@@ -46,12 +46,12 @@ import (
 	"github.com/hlandau/dexlogconfig"
 	"github.com/hlandau/xlog"
 	"github.com/oraoto/go-pidfd"
+	"github.com/robertmin1/heteronculous-horklump/httpproxy"
 	"github.com/robertmin1/socks5/v4"
 	"github.com/u-root/u-root/pkg/strace"
 	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
-	"github.com/robertmin1/heteronculous-horklump/http_proxy"
 )
 
 var (
@@ -65,20 +65,20 @@ var authData []struct {
 	password string
 }
 
-var exit_addr sync.Map
+var exitAddr sync.Map
 
 // Config is a struct to store the program's configuration values.
 type Config struct {
-	Program     string   `usage:"Program Name"`
-	SocksTCP    string   `default:"127.0.0.1:9050"`
-	Args        []string `usage:"Program Arguments"`
-	KillProg    bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
-	LogLeaks    bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
-	EnvVar      bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
-	Redirect    string     `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
-	Proxyuser    string   `default:"" usage:"Proxy username in case of proxy redirection"`
-	Proxypass    string   `default:"" usage:"Proxy password in case of proxy redirection"`
-	One_circuit bool     `default:"false" usage:"Disable random SOCKS behavior"`
+	Program    string   `usage:"Program Name"`
+	SocksTCP   string   `default:"127.0.0.1:9050"`
+	Args       []string `usage:"Program Arguments"`
+	KillProg   bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
+	LogLeaks   bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
+	EnvVar     bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
+	Redirect   string   `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
+	Proxyuser  string   `default:"" usage:"Proxy username in case of proxy redirection"`
+	Proxypass  string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	OneCircuit bool     `default:"false" usage:"Disable random SOCKS behavior"`
 }
 
 // FullAddress is the network address and port
@@ -133,7 +133,7 @@ func main() {
 				return err
 			}
 		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
-			_, ok := exit_addr.Load(record.PID)
+			_, ok := exitAddr.Load(record.PID)
 			if ok {
 				if err := Socksify(record.Syscall.Args, record, t, cfg); err != nil {
 					return err
@@ -154,7 +154,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	}
 
 	IPPort := address.String()
-	if IPPort == cfg.SocksTCP || IPPort == "/var/run/nscd/socket"{ //nolint
+	if IPPort == cfg.SocksTCP || IPPort == "/var/run/nscd/socket" { //nolint
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
 	} else {
 		if cfg.LogLeaks {
@@ -166,15 +166,15 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			return nil
 		}
 		if cfg.Redirect != "" {
-			exit_addr.Store(record.PID, IPPort)
-			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP)
+			exitAddr.Store(record.PID, IPPort)
+			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP) //nolint
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
 			return nil
-		// TODO: handle invalid flag
-		// Incase trans proxy will require a different implementation a switch will be used.	
+			// TODO: handle invalid flag
+			// Incase trans proxy will require a different implementation a switch will be used.
 		}
 
 		err := BlockSyscall(record.PID, IPPort)
@@ -340,31 +340,31 @@ func SetEnv(cfg Config) string {
 func BlockSyscall(pid int, ipport string) error {
 	// Trace the syscall
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("error while tracing syscall for process with PID %d: %v", pid, err)
+		return fmt.Errorf("error while tracing syscall for process with PID %d: %w", pid, err)
 	}
 
 	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return fmt.Errorf("error while waiting for process with PID %d: %v", pid, err)
+		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
 	}
 
 	// Struct to store the current register values from unix.PtraceGetRegs
 	regs := &unix.PtraceRegs{}
 	if err := unix.PtraceGetRegs(pid, regs); err != nil {
-		return fmt.Errorf("error while getting register values from process with PID %d: %v", pid, err)
+		return fmt.Errorf("error while getting register values from process with PID %d: %w", pid, err)
 	}
 
 	// Set to invalid syscall and set the new register values
 	regs.Rax = math.MaxUint64
 	if err := unix.PtraceSetRegs(pid, regs); err != nil {
-		return fmt.Errorf("error while setting register values for process with PID %d: %v", pid, err)
+		return fmt.Errorf("error while setting register values for process with PID %d: %w", pid, err)
 	}
 
 	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("error while tracing syscall for process with PID %d: %v", pid, err)
+		return fmt.Errorf("error while tracing syscall for process with PID %d: %w", pid, err)
 	}
 
 	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return fmt.Errorf("error while waiting for process with PID %d: %v", pid, err)
+		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
 	}
 
 	fmt.Printf("Blocking -> %v\n", ipport) //nolint
@@ -424,38 +424,37 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 
 func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace.Task, cfg Config) error {
 	username, password := cfg.Proxyuser, cfg.Proxypass
-	if !cfg.One_circuit {
-		// generate random index
-		idxBytes := make([]byte, 1)
+
+	if !cfg.OneCircuit {
+		idxBytes := make([]byte, 1) // generate random index
 		if _, err := rand.Read(idxBytes); err != nil {
 			panic(err)
 		}
 
-		idx := int(idxBytes[0]) % len(authData)
-		// get random auth data
+		idx := int(idxBytes[0]) % len(authData) // get random auth data
 		username = authData[idx].username
 		password = authData[idx].password
 	}
 
-	addr, _ := exit_addr.LoadAndDelete(record.PID)
+	addr, _ := exitAddr.LoadAndDelete(record.PID)
 	IPPort := fmt.Sprintf("%v", addr)
 	fd := record.Syscall.Args[0].Uint()
 
 	p, err := pidfd.Open(record.PID, 0)
 	if err != nil {
-		return fmt.Errorf("error opening PID file descriptor: %v\n", err)
+		return fmt.Errorf("error opening PID file descriptor: %v", err)
 	}
 
 	listenfd, err := p.GetFd(int(fd), 0)
 	if err != nil {
-		return fmt.Errorf("error getting listen file descriptor: %v\n", err)
+		return fmt.Errorf("error getting listen file descriptor: %v", err)
 	}
 
 	file := os.NewFile(uintptr(listenfd), "")
 
 	conn, err := net.FileConn(file)
 	if err != nil {
-		return fmt.Errorf("error creating connection from file: %v\n", err)
+		return fmt.Errorf("error creating connection from file: %v", err)
 	}
 
 	switch cfg.Redirect {
@@ -467,11 +466,11 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 		_, err = cl.Dial("tcp", IPPort, conn)
 		if err != nil {
-			return fmt.Errorf("an error occured while running dial : %w", err)
+			return fmt.Errorf("an error occurred while running dial : %w", err)
 		}
-	
+
 	case "http":
-		cl, err := http_proxy.NewClient(cfg.SocksTCP, username, password)
+		cl, err := httpproxy.NewClient(cfg.SocksTCP, username, password)
 		if err != nil {
 			return err
 		}
@@ -481,10 +480,8 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 			return err
 		}
 
-	case "trans":
-		// TODO		
+	case "trans": // TODO
 	}
-	
 
 	return nil
 }
@@ -507,6 +504,7 @@ func GenerateRandomCredentials() (string, error) {
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
+
 	return hex.EncodeToString(bytes), nil
 }
 

@@ -5,12 +5,12 @@ HTTP Proxy is a simple Go package that provides a basic implementation of an HTT
 
 ## Installation
 ```
-go get github.com/username/http_proxy
+go get github.com/username/httpproxy
 ```
 
 ## Usage
 
-To use the HttpDialer struct, first create a new instance of it using NewClient method, which takes in three parameters:
+To use the HTTPDialer struct, first create a new instance of it using NewClient method, which takes in three parameters:
 
 `addr` : the address of the proxy server
 
@@ -18,4 +18,4 @@ To use the HttpDialer struct, first create a new instance of it using NewClient 
 
 `password` : the password for authentication
 
-Then, you can use the Dial method of the HttpDialer to create a connection to a destination address through the HTTP proxy.
+Then, you can use the Dial method of the HTTPDialer to create a connection to a destination address through the HTTP proxy.
