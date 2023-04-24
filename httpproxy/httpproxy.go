@@ -31,6 +31,7 @@ func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 	reqURL, err := url.Parse("http://" + addr)
 	if err != nil {
 		conn.Close()
+
 		return nil, err
 	}
 
@@ -47,6 +48,7 @@ func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 
 	if err != nil {
 		conn.Close()
+
 		return nil, err
 	}
 
@@ -55,6 +57,7 @@ func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 	resp, err := http.ReadResponse(r, req)
 	if err != nil {
 		conn.Close()
+
 		return nil, err
 	}
 
@@ -62,6 +65,7 @@ func (h *HTTPDialer) Dial(network, addr string, httpconn net.Conn) (net.Conn, er
 
 	if resp.StatusCode != http.StatusOK {
 		conn.Close()
+
 		return nil, fmt.Errorf("connect proxy error: %v", strings.SplitN(resp.Status, " ", 2)[1])
 	}
 
