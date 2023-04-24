@@ -140,6 +140,7 @@ func main() {
 				}
 			}
 		}
+
 		return nil
 	}); err != nil {
 		panic(err)
@@ -159,10 +160,12 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	} else {
 		if cfg.LogLeaks {
 			log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
+
 			return nil
 		}
 		if cfg.KillProg {
 			KillApp(program, IPPort)
+
 			return nil
 		}
 		if cfg.Redirect != "" {
@@ -172,6 +175,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
+
 			return nil
 			// TODO: handle invalid flag
 			// Incase trans proxy will require a different implementation a switch will be used.
@@ -391,7 +395,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 		addrStruct.sin_port = C.htons(C.in_port_t(intPort))
 		ip := C.CString(host)
 
-		defer C.free(unsafe.Pointer(ip))
+		defer C.free(unsafe.Pointer(ip)) //nolint
 
 		addrStruct.sin_addr.s_addr = C.inet_addr(ip)
 		pokeData = C.GoBytes(unsafe.Pointer(&addrStruct), C.sizeof_struct_sockaddr_in) //nolint
