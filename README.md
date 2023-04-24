@@ -54,7 +54,7 @@ along with heteronculous-horklump.  If not, see [https://www.gnu.org/licenses/](
 Namecoin is produced independently from the Tor® anonymity software and carries no guarantee from The Tor Project about quality, suitability or anything else.
 
 
-### Security Risks and Precautions for Using Horklump
+## Security Risks and Precautions for Using Horklump
 
 Horklump is a tool that provides a ptrace-based sandbox for executing untrusted programs. While this can be an effective way to enhance security and reduce the risk of malicious processes accessing sensitive information, there are also potential security risks associated with using Horklump.
 
