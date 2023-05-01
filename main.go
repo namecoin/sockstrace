@@ -86,6 +86,9 @@ type FullAddress struct {
 	// Addr is the network address.
 	Addr string
 
+	// Family is the address family.
+	Family uint16
+
 	// Port is the transport port.
 	//
 	// This may not be used by all endpoint types.
@@ -155,7 +158,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	}
 
 	IPPort := address.String()
-	if IPPort == cfg.SocksTCP || IPPort == "/var/run/nscd/socket" { //nolint
+	if IPPort == cfg.SocksTCP || address.Family == unix.AF_UNIX { //nolint
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
 	} else {
 		if cfg.LogLeaks {
@@ -260,7 +263,8 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 		}
 
 		return FullAddress{
-			Addr: string(path),
+			Family: fam,
+			Addr:   string(path),
 		}, nil
 
 	case unix.AF_INET:
@@ -273,8 +277,9 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 
 		ip := net.IP(inet4Addr.Addr[:])
 		out := FullAddress{
-			Addr: ip.String(),
-			Port: inet4Addr.Port,
+			Family: fam,
+			Addr:   ip.String(),
+			Port:   inet4Addr.Port,
 		}
 
 		if out.Addr == "\x00\x00\x00\x00" {
@@ -293,8 +298,9 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 
 		ip := net.IP(inet6Addr.Addr[:])
 		out := FullAddress{
-			Addr: ip.String(),
-			Port: inet6Addr.Port,
+			Family: fam,
+			Addr:   ip.String(),
+			Port:   inet6Addr.Port,
 		}
 
 		// if isLinkLocal(out.Addr) {
@@ -308,7 +314,9 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 		return out, nil
 
 	default:
-		return FullAddress{}, unix.ENOTSUP
+		return FullAddress{
+			Family: fam,
+		}, nil
 	}
 }
 
