@@ -69,22 +69,28 @@ var exitAddr sync.Map
 
 // Config is a struct to store the program's configuration values.
 type Config struct { //nolint
-	Program    string   `usage:"Program Name"`
-	SocksTCP   string   `default:"127.0.0.1:9050"`
-	Args       []string `usage:"Program Arguments"`
-	KillProg   bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
-	LogLeaks   bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
-	EnvVar     bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
-	Redirect   string   `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
-	Proxyuser  string   `default:"" usage:"Proxy username in case of proxy redirection"`
-	Proxypass  string   `default:"" usage:"Proxy password in case of proxy redirection"`
-	OneCircuit bool     `default:"false" usage:"Disable random SOCKS behavior"`
+	Program           string   `usage:"Program Name"`
+	SocksTCP          string   `default:"127.0.0.1:9050"`
+	Args              []string `usage:"Program Arguments"`
+	KillProg          bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
+	LogLeaks          bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
+	EnvVar            bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
+	Redirect          string   `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
+	Proxyuser         string   `default:"" usage:"Proxy username in case of proxy redirection"`
+	Proxypass         string   `default:"" usage:"Proxy password in case of proxy redirection"`
+	OneCircuit        bool     `default:"false" usage:"Disable random SOCKS behavior"`
+	WhitelistLoopback bool     `default:"false" usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
 }
 
 // FullAddress is the network address and port
 type FullAddress struct {
 	// Addr is the network address.
 	Addr string
+
+	// IP is the network address as an IP.
+	//
+	// This may not be used by all endpoint types.
+	IP net.IP
 
 	// Family is the address family.
 	Family uint16
@@ -150,14 +156,26 @@ func main() {
 	}
 }
 
+func IsIPAddressAllowed(address FullAddress, cfg Config) bool {
+	if cfg.SocksTCP == address.String() {
+		return true
+	}
+
+	if cfg.WhitelistLoopback && address.IP.IsLoopback() {
+		return true
+	}
+
+	return false
+}
+
 func IsAddressAllowed(address FullAddress, cfg Config) bool {
 	switch address.Family {
 	case unix.AF_UNIX:
 		return true
 	case unix.AF_INET:
-		return address.String() == cfg.SocksTCP
+		return IsIPAddressAllowed(address, cfg)
 	case unix.AF_INET6:
-		return address.String() == cfg.SocksTCP
+		return IsIPAddressAllowed(address, cfg)
 	default:
 		return false
 	}
@@ -292,6 +310,7 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 		out := FullAddress{
 			Family: fam,
 			Addr:   ip.String(),
+			IP:     ip,
 			Port:   inet4Addr.Port,
 		}
 
@@ -313,6 +332,7 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 		out := FullAddress{
 			Family: fam,
 			Addr:   ip.String(),
+			IP:     ip,
 			Port:   inet6Addr.Port,
 		}
 
@@ -510,15 +530,15 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 }
 
 func (i FullAddress) String() string {
-	parsedhost := net.ParseIP(i.Addr)
-
 	switch {
-	case parsedhost.To4() != nil:
+	case i.IP == nil:
+		return i.Addr
+	case i.IP.To4() != nil:
 		return fmt.Sprintf("%s:%d", i.Addr, i.Port)
-	case parsedhost.To16() != nil:
+	case i.IP.To16() != nil:
 		return fmt.Sprintf("[%s]:%d", i.Addr, i.Port)
 	default:
-		return fmt.Sprintf("%s", i.Addr)
+		return i.Addr
 	}
 }
 
