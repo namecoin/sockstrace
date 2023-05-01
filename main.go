@@ -150,6 +150,19 @@ func main() {
 	}
 }
 
+func IsAddressAllowed(address FullAddress, cfg Config) bool {
+	switch address.Family {
+	case unix.AF_UNIX:
+		return true
+	case unix.AF_INET:
+		return address.String() == cfg.SocksTCP
+	case unix.AF_INET6:
+		return address.String() == cfg.SocksTCP
+	default:
+		return false
+	}
+}
+
 func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error {
 	// Parse the IP and Port.
 	address, err := ParseAddress(task, record.Syscall.Args)
@@ -158,7 +171,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	}
 
 	IPPort := address.String()
-	if IPPort == cfg.SocksTCP || address.Family == unix.AF_UNIX { //nolint
+	if IsAddressAllowed(address, cfg) { //nolint
 		fmt.Printf("Connecting to %v\n", IPPort) //nolint
 	} else {
 		if cfg.LogLeaks {
