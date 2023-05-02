@@ -172,7 +172,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 
 	IPPort := address.String()
 	if IsAddressAllowed(address, cfg) { //nolint
-		fmt.Printf("Connecting to %v\n", IPPort) //nolint
+		log.Infof("Connecting to %v", IPPort)
 	} else {
 		if cfg.LogLeaks {
 			log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
@@ -186,7 +186,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 		}
 		if cfg.Redirect != "" {
 			exitAddr.Store(record.PID, IPPort)
-			fmt.Printf("Redirecting connections from %v to %v\n", IPPort, cfg.SocksTCP) //nolint
+			log.Infof("Redirecting connections from %v to %v", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
@@ -337,10 +337,11 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 func KillApp(program *exec.Cmd, iPPort string) {
 	err := program.Process.Signal(syscall.SIGKILL)
 	if err != nil {
-		fmt.Println("Failed to kill the application: %v\n", err) //nolint
+		log.Errorf("Failed to kill the application: %v", err)
 		panic(err)
 	}
-	fmt.Printf("Proxy Leak Detected : %v. Killing the Application.\n", iPPort) //nolint
+
+	log.Warnf("Proxy Leak Detected : %v. Killing the Application.", iPPort)
 }
 
 // Setting environment variables.
@@ -392,7 +393,7 @@ func BlockSyscall(pid int, ipport string) error {
 		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
 	}
 
-	fmt.Printf("Blocking -> %v\n", ipport) //nolint
+	log.Warnf("Blocking -> %v", ipport)
 
 	return nil
 }
@@ -432,7 +433,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 
 		pokeData = C.GoBytes(unsafe.Pointer(&addrStruct), C.int(unsafe.Sizeof(addrStruct))) //nolint
 	case parsedhost.To4()[0] == UDPProtolNum:
-		fmt.Println("Support for UDP will be implemented") //nolint
+		log.Error("Support for UDP will be implemented")
 	default:
 		return errors.New("invalid ip address")
 	}
@@ -442,7 +443,7 @@ func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.Trac
 		return fmt.Errorf("error poking data into process with PID %d: %w", record.PID, err)
 	}
 
-	fmt.Printf("Connecting to %v\n", cfg.SocksTCP) //nolint
+	log.Infof("Connecting to %v", cfg.SocksTCP)
 
 	return nil
 }
