@@ -559,7 +559,7 @@ func DumpStackTrace(pid int) error {
 	cmdline := strings.Split(string(commBytes), "\x00")
 
 	// Add a separator with date and time for the new instance of the program
-	separator := fmt.Sprintf("-------------------- New Instance: %s --------------------", time.Now().Format("2006-01-02 15:04:05"))
+	separator := fmt.Sprintf("----------- New Instance: %s ------------", time.Now().Format("2006-01-02 15:04:05"))
 	go_log.Println(separator)
 
 	// Add the PID and Process Name and Args.
