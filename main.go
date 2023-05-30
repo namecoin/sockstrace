@@ -33,14 +33,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	go_log "log"
 	"math"
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/hlandau/dexlogconfig"
@@ -192,6 +195,11 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	if IsAddressAllowed(address, cfg) { //nolint
 		log.Infof("Connecting to %v", IPPort)
 	} else {
+		// Dump Stack Trace and Process Information
+		if err := DumpStackTrace(record.PID); err != nil {
+			return err
+		}
+
 		if cfg.LogLeaks {
 			log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
 
@@ -528,6 +536,44 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	}
 
 	return nil // Support more proxies
+}
+
+func DumpStackTrace(pid int) error {
+	// Create or open the log file in append mode
+	logFile, err := os.OpenFile("stack_trace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint
+	if err != nil {
+		return err
+	}
+
+	defer logFile.Close()
+	// Set the log output to the log file
+	go_log.SetOutput(logFile)
+
+	commPath := fmt.Sprintf("/proc/%d/cmdline", pid)
+
+	commBytes, err := os.ReadFile(commPath)
+	if err != nil {
+		return err
+	}
+	// Split the contents by null byte to separate command and arguments
+	cmdline := strings.Split(string(commBytes), "\x00")
+
+	// Add a separator with date and time for the new instance of the program
+	separator := fmt.Sprintf("-------------------- New Instance: %s --------------------", time.Now().Format("2006-01-02 15:04:05"))
+	go_log.Println(separator)
+
+	// Add the PID and Process Name and Args.
+	go_log.Printf("PID :%v", pid)
+	go_log.Printf("Program and Arguments:%v\n", cmdline)
+
+	// Get the stack trace
+	stack := make([]byte, 8192)
+	length := runtime.Stack(stack, true)
+
+	// Write the stack trace to the log file
+	go_log.Println(string(stack[:length]))
+
+	return nil
 }
 
 func (i FullAddress) String() string {
