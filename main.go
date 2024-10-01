@@ -52,7 +52,6 @@ import (
 	"github.com/robertmin1/heteronculous-horklump/httpproxy"
 	"github.com/robertmin1/socks5/v4"
 	"github.com/u-root/u-root/pkg/strace"
-	"github.com/u-root/u-root/pkg/ubinary"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
 )
@@ -282,7 +281,7 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 	famBuf := bytes.NewBuffer(socketaddr[:2])
 
 	var fam uint16
-	if err := binary.Read(famBuf, ubinary.NativeEndian, &fam); err != nil {
+	if err := binary.Read(famBuf, binary.NativeEndian, &fam); err != nil {
 		return FullAddress{}, fmt.Errorf("error while reading binary data: %w", err)
 	}
 
