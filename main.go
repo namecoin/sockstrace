@@ -379,11 +379,9 @@ func KillApp(program *exec.Cmd, iPPort string) {
 
 // KillTracee kills the specific tracee process causing the leak.
 func KillTracee(traceePID int) error {
-	fmt.Println("123 running")
 	if err := syscall.Kill(traceePID, syscall.SIGKILL); err != nil {
 		return fmt.Errorf("failed to kill tracee PID %d: %w", traceePID, err)
 	}
-	fmt.Println("000000 done ")
 	log.Infof("Killed tracee PID: %d due to a proxy leak.", traceePID)
 	return nil
 }
