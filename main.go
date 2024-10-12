@@ -75,6 +75,7 @@ type Config struct { //nolint
 	SocksTCP          string   `default:"127.0.0.1:9050"`
 	Args              []string `usage:"Program Arguments"`
 	KillProg          bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
+	KillTracee        bool     `default:"false" usage:"Kill only the specific tracee causing the leak (bool)"`
 	LogLeaks          bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
 	EnvVar            bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
 	Redirect          string   `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
@@ -201,6 +202,11 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 
 		if cfg.LogLeaks {
 			log.Warnf("Proxy Leak detected, but allowed : %v", IPPort)
+
+			return nil
+		}
+		if cfg.KillTracee {
+			KillTracee(record.PID)
 
 			return nil
 		}
@@ -369,6 +375,17 @@ func KillApp(program *exec.Cmd, iPPort string) {
 	}
 
 	log.Warnf("Proxy Leak Detected : %v. Killing the Application.", iPPort)
+}
+
+// KillTracee kills the specific tracee process causing the leak.
+func KillTracee(traceePID int) error {
+	fmt.Println("123 running")
+	if err := syscall.Kill(traceePID, syscall.SIGKILL); err != nil {
+		return fmt.Errorf("failed to kill tracee PID %d: %w", traceePID, err)
+	}
+	fmt.Println("000000 done ")
+	log.Infof("Killed tracee PID: %d due to a proxy leak.", traceePID)
+	return nil
 }
 
 // Setting environment variables.
