@@ -621,10 +621,10 @@ func applySeccompFilter() error{
 		NoNewPrivs: true,
 		Flag:       seccomp.FilterFlagTSync,
 		Policy: seccomp.Policy{
-			DefaultAction: seccomp.ActionAllow,
+			DefaultAction: seccomp.ActionTrap,
 			Syscalls: []seccomp.SyscallGroup{
 				{
-					Action: seccomp.ActionErrno,
+					Action: seccomp.ActionAllow,
 					// Torsocks syscall whitelist https://gitlab.torproject.org/tpo/core/torsocks/-/blob/main/src/lib/syscall.c?ref_type=heads#L486
 					Names: []string{
 						"socket",            // Create an endpoint for communication (network socket)
