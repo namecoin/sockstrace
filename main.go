@@ -621,7 +621,7 @@ func applySeccompFilter() error{
 		NoNewPrivs: true,
 		Flag:       seccomp.FilterFlagTSync,
 		Policy: seccomp.Policy{
-			DefaultAction: seccomp.ActionTrap,
+			DefaultAction: seccomp.ActionErrno,
 			Syscalls: []seccomp.SyscallGroup{
 				{
 					Action: seccomp.ActionAllow,
