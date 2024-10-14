@@ -54,6 +54,7 @@ import (
 	"github.com/u-root/u-root/pkg/strace"
 	"golang.org/x/sys/unix"
 	"gopkg.in/hlandau/easyconfig.v1"
+	seccomp "github.com/elastic/go-seccomp-bpf"
 )
 
 var (
@@ -135,6 +136,12 @@ func main() {
 
 		cfg.Proxyuser = username
 		cfg.Proxypass = password
+	}
+
+	err := applySeccompFilter()
+	if err != nil {
+		fmt.Printf("Error applying seccomp filter: %v\n", err)
+		return
 	}
 
 	// Start the program with tracing and handle the CONNECT system call events.
@@ -606,4 +613,61 @@ func initializeAuthData() {
 			password string
 		}{username, password})
 	}
+}
+
+func applySeccompFilter() error{
+	// Create a filter.
+	filter := seccomp.Filter{
+		NoNewPrivs: true,
+		Flag:       seccomp.FilterFlagTSync,
+		Policy: seccomp.Policy{
+			DefaultAction: seccomp.ActionAllow,
+			Syscalls: []seccomp.SyscallGroup{
+				{
+					Action: seccomp.ActionErrno,
+					// Torsocks syscall whitelist https://gitlab.torproject.org/tpo/core/torsocks/-/blob/main/src/lib/syscall.c?ref_type=heads#L486
+					Names: []string{
+						"socket",            // Create an endpoint for communication (network socket)
+						"connect",           // Initiate a connection on a socket
+						"close",             // Close a file descriptor, socket, or resource
+						"mmap",              // Map files or devices into memory
+						"munmap",            // Unmap previously mapped memory
+						"accept",            // Accept a connection on a socket
+						"getpeername",       // Retrieve the address of the peer connected to a socket
+						"listen",            // Listen for connections on a socket
+						"recvmsg",           // Receive messages from a socket
+						"gettid",            // Get the thread ID of the calling thread
+						"getrandom",         // Generate random numbers from the kernel's entropy pool
+						"futex",             // Fast user-space locking (for thread synchronization)
+						"accept4",           // Accept a connection on a socket with flags (non-blocking, etc.)
+						"epoll_create1",     // Create an epoll instance (used for scalable I/O event notification)
+						"epoll_wait",        // Wait for I/O events on an epoll instance
+						"epoll_pwait",       // Similar to epoll_wait but allows signal mask modification
+						"epoll_ctl",         // Control interface for epoll, used to add/remove/watch file descriptors
+						"eventfd2",          // Create a file descriptor for event notifications
+						"inotify_init1",     // Initialize inotify (used to monitor filesystem changes)
+						"inotify_add_watch", // Add a watch for filesystem events (e.g., file changes)
+						"inotify_rm_watch",  // Remove a watch from inotify
+						"sched_getaffinity", // Get the CPU affinity mask for a thread (which CPUs the thread can run on)
+						"seccomp",           // Load or manipulate a seccomp filter (for syscall restriction)
+						"gettimeofday",      // Get the current time
+						"clock_gettime",     // Retrieve the time of the specified clock (e.g., system uptime)
+						"fork",              // Create a new process by duplicating the calling process
+						"memfd_create",      // Create an anonymous file in memory (used for file-backed memory regions)
+						"getdents",          // Read directory entries from a file descriptor
+						"getdents64",        // Read directory entries (64-bit version, used on 64-bit systems)
+					},
+				},
+			},
+		},
+	}
+
+	// Load it. This will set no_new_privs before loading.
+	if err := seccomp.LoadFilter(filter); err != nil {
+		fmt.Println("failed to load filter: ", err)
+		return err
+	}
+	fmt.Println("Seccomp filter applied successfully")
+	
+	return nil
 }
