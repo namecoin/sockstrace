@@ -11,7 +11,6 @@ Prerequisites:
 
 2. Set up Go modules
 ```
-go mod init github.com/namecoin/heteronculous-horklump
 go mod tidy
 ```
 

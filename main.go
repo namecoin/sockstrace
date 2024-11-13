@@ -27,6 +27,7 @@ package main
 import "C"
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
@@ -36,6 +37,8 @@ import (
 	go_log "log"
 	"math"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -46,14 +49,13 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/hlandau/dexlogconfig"
-	"github.com/hlandau/xlog"
-	"github.com/oraoto/go-pidfd"
-	"github.com/robertmin1/heteronculous-horklump/httpproxy"
-	"github.com/robertmin1/socks5/v4"
-	"github.com/u-root/u-root/pkg/strace"
+	"github.com/hlandau/dexlogconfig"     //nolint:depguard // Required for logging configuration
+	"github.com/hlandau/xlog"             //nolint:depguard // Required for logging
+	"github.com/oraoto/go-pidfd"          //nolint:depguard // Required for pidfd operations
+	"github.com/robertmin1/socks5/v4"     //nolint:depguard // Required for SOCKS5 proxy operations
+	"github.com/u-root/u-root/pkg/strace" //nolint:depguard // Required for system call tracing
 	"golang.org/x/sys/unix"
-	"gopkg.in/hlandau/easyconfig.v1"
+	easyconfig "gopkg.in/hlandau/easyconfig.v1"
 )
 
 var (
@@ -69,19 +71,25 @@ var authData []struct {
 
 var exitAddr sync.Map
 
+type HTTPDialer struct {
+	Host     string
+	Username string
+	Password string
+}
+
 // Config is a struct to store the program's configuration values.
-type Config struct { //nolint
+type Config struct {
 	Program           string   `usage:"Program Name"`
 	SocksTCP          string   `default:"127.0.0.1:9050"`
 	Args              []string `usage:"Program Arguments"`
-	KillProg          bool     `default:"false" usage:"Kill the Program in case of a Proxy Leak (bool)"`
-	LogLeaks          bool     `default:"false" usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
-	EnvVar            bool     `default:"true" usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
-	Redirect          string   `default:"socks5" usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
-	Proxyuser         string   `default:"" usage:"Proxy username in case of proxy redirection"`
-	Proxypass         string   `default:"" usage:"Proxy password in case of proxy redirection"`
-	OneCircuit        bool     `default:"false" usage:"Disable random SOCKS behavior"`
-	WhitelistLoopback bool     `default:"false" usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
+	KillProg          bool     `default:"false"           usage:"Kill the Program in case of a Proxy Leak (bool)"`
+	LogLeaks          bool     `default:"false"           usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
+	EnvVar            bool     `default:"true"            usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"` //nolint:lll
+	Redirect          string   `default:"socks5"          usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`   //nolint:lll
+	Proxyuser         string   `default:""                usage:"Proxy username in case of proxy redirection"`
+	Proxypass         string   `default:""                usage:"Proxy password in case of proxy redirection"`
+	OneCircuit        bool     `default:"false"           usage:"Disable random SOCKS behavior"`
+	WhitelistLoopback bool     `default:"false"           usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
 }
 
 // FullAddress is the network address and port
@@ -231,41 +239,6 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	return nil
 }
 
-// eventName returns an event name. There should never be an event name
-// we do not known and, if we encounter one, we panic.
-func eventName(r *strace.TraceRecord) (string, error) { //nolint
-	// form up a reasonable name for a system call.
-	// If there is no name, then it will be Exxxx or Xxxxx, where x
-	// is the system call number as %04x.
-	// Note that users can specify this: E0x0000, for example
-	var sysName string
-
-	switch r.Event {
-	case strace.SyscallEnter, strace.SyscallExit:
-		var err error
-		if sysName, err = strace.ByNumber(uintptr(r.Syscall.Sysno)); err != nil {
-			sysName = fmt.Sprintf("%04x", r.Syscall.Sysno)
-		}
-	}
-
-	switch r.Event {
-	case strace.SyscallEnter:
-		return sysName, nil
-	case strace.SyscallExit:
-		return sysName, nil
-	case strace.SignalExit:
-		return fmt.Sprintf("SignalExit"), nil
-	case strace.Exit:
-		return fmt.Sprintf("Exit"), nil
-	case strace.SignalStop:
-		return fmt.Sprintf("SignalStop"), nil
-	case strace.NewChild:
-		return fmt.Sprintf("NewChild"), nil
-	}
-
-	return "", fmt.Errorf("unknown event %#x from record %v", r.Event, r)
-}
-
 // ParseAddress reads an sockaddr struct from the given address and converts it
 // to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
 // addresses
@@ -347,7 +320,7 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 		//			out.NIC = NICID(a.Scope_id)
 		//}
 
-		if out.Addr == strings.Repeat(nullByte, 16) {
+		if out.Addr == strings.Repeat(nullByte, net.IPv6len) {
 			out.Addr = ""
 		}
 
@@ -512,7 +485,8 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 	switch cfg.Redirect {
 	case "socks5":
-		cl, err := socks5.NewClient(IPPort, username, password, 10, 10)
+		const timeout = 10
+		cl, err := socks5.NewClient(IPPort, username, password, timeout, timeout)
 		if err != nil {
 			return err
 		}
@@ -523,7 +497,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 		}
 
 	case "http":
-		cl, err := httpproxy.NewClient(cfg.SocksTCP, username, password)
+		cl, err := NewHTTPClient(cfg.SocksTCP, username, password)
 		if err != nil {
 			return err
 		}
@@ -539,7 +513,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 
 func DumpStackTrace(pid int) error {
 	// Create or open the log file in append mode
-	logFile, err := os.OpenFile("stack_trace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint
+	logFile, err := os.OpenFile("stack_trace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint
 	if err != nil {
 		return err
 	}
@@ -566,7 +540,8 @@ func DumpStackTrace(pid int) error {
 	go_log.Printf("Program and Arguments:%v\n", cmdline)
 
 	// Get the stack trace
-	stack := make([]byte, 8192)
+	const stackSize = 8192
+	stack := make([]byte, stackSize) // 8192 bytes
 	length := runtime.Stack(stack, true)
 
 	// Write the stack trace to the log file
@@ -589,7 +564,8 @@ func (i FullAddress) String() string {
 }
 
 func GenerateRandomCredentials() (string, error) {
-	bytes := make([]byte, 48)
+	const credentialLength = 48
+	bytes := make([]byte, credentialLength)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
@@ -598,7 +574,7 @@ func GenerateRandomCredentials() (string, error) {
 }
 
 func initializeAuthData() {
-	for i := 0; i < 10; i++ {
+	for range [10]int{} {
 		username, _ := GenerateRandomCredentials()
 		password, _ := GenerateRandomCredentials()
 		authData = append(authData, struct {
@@ -606,4 +582,64 @@ func initializeAuthData() {
 			password string
 		}{username, password})
 	}
+}
+
+func NewHTTPClient(addr, username, password string) (*HTTPDialer, error) {
+	httpDialer := &HTTPDialer{
+		Host:     addr,
+		Username: username,
+		Password: password,
+	}
+
+	return httpDialer, nil
+}
+
+// Dial establishes a connection to the provided address through an HTTP proxy.
+// It sends an HTTP CONNECT request to the proxy server and returns the established
+// connection if successful. If an error occurs, the connection is closed and the error is returned.
+func (h *HTTPDialer) Dial(_, addr string, httpconn net.Conn) (net.Conn, error) {
+	conn := httpconn
+
+	reqURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		conn.Close()
+
+		return nil, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    reqURL,
+		Host:   addr,
+		Header: make(http.Header),
+	}
+
+	// Set authentication details.
+	req.SetBasicAuth(h.Username, h.Password)
+
+	err = req.Write(conn)
+	if err != nil {
+		conn.Close()
+
+		return nil, fmt.Errorf("failed to write request: %w", err)
+	}
+
+	r := bufio.NewReader(conn)
+
+	resp, err := http.ReadResponse(r, req)
+	if err != nil {
+		conn.Close()
+
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+
+		return nil, fmt.Errorf("connect proxy error: %v", strings.SplitN(resp.Status, " ", 2)[1]) //nolint
+	}
+
+	return conn, nil
 }
