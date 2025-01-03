@@ -233,10 +233,10 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
-
-			return nil
+			
 			// TODO: handle invalid flag
 			// Incase trans proxy will require a different implementation a switch will be used.
+			return nil
 		}
 		err := BlockSyscall(record.PID, IPPort)
 		if err != nil {
@@ -247,7 +247,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	return nil
 }
 
-// ParseAddress reads an sockaddr struct from the given address and converts it //nolint
+// ParseAddress reads an sockaddr struct from the given address and converts it
 // to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
 // addresses
 func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
