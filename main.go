@@ -49,14 +49,14 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/hlandau/dexlogconfig"     //nolint:depguard // Required for logging configuration
-	"github.com/hlandau/xlog"             //nolint:depguard // Required for logging
-	"github.com/oraoto/go-pidfd"          //nolint:depguard // Required for pidfd operations
-	"github.com/robertmin1/socks5/v4"     //nolint:depguard // Required for SOCKS5 proxy operations
-	"github.com/u-root/u-root/pkg/strace" //nolint:depguard // Required for system call tracing
+	seccomp "github.com/elastic/go-seccomp-bpf" //nolint:depguard // Required for seccomp-tracing
+	"github.com/hlandau/dexlogconfig"           //nolint:depguard // Required for logging configuration
+	"github.com/hlandau/xlog"                   //nolint:depguard // Required for logging
+	"github.com/oraoto/go-pidfd"                //nolint:depguard // Required for pidfd operations
+	"github.com/robertmin1/socks5/v4"           //nolint:depguard // Required for SOCKS5 proxy operations
+	"github.com/u-root/u-root/pkg/strace"       //nolint:depguard // Required for system call tracing
 	"golang.org/x/sys/unix"
 	easyconfig "gopkg.in/hlandau/easyconfig.v1"
-	seccomp "github.com/elastic/go-seccomp-bpf"
 )
 
 var (
@@ -93,7 +93,7 @@ type Config struct {
 	WhitelistLoopback bool     `default:"false"           usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
 }
 
-// FullAddress is the network address and port
+// FullAddress is the network address and port.
 type FullAddress struct {
 	// Addr is the network address.
 	Addr string
@@ -674,5 +674,6 @@ func setupSeccomp() error {
 	if err := seccomp.LoadFilter(filter); err != nil {
 		return fmt.Errorf("failed to load seccomp filter: %w", err)
 	}
+	
 	return nil
 }
