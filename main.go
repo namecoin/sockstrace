@@ -56,6 +56,7 @@ import (
 	"github.com/u-root/u-root/pkg/strace" //nolint:depguard // Required for system call tracing
 	"golang.org/x/sys/unix"
 	easyconfig "gopkg.in/hlandau/easyconfig.v1"
+	seccomp "github.com/elastic/go-seccomp-bpf"
 )
 
 var (
@@ -145,8 +146,13 @@ func main() {
 		cfg.Proxypass = password
 	}
 
+	// Setup seccomp to trace the "connect" syscall.
+	if err := setupSeccomp(); err != nil {
+		panic(err)
+	}
+
 	// Start the program with tracing and handle the CONNECT system call events.
-	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
+	if err := strace.New(program, true, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			if err := HandleConnect(t, record, program, cfg); err != nil {
 				return err
@@ -642,4 +648,31 @@ func (h *HTTPDialer) Dial(_, addr string, httpconn net.Conn) (net.Conn, error) {
 	}
 
 	return conn, nil
+}
+
+func setupSeccomp() error {
+	// Create a seccomp filter for tracing the "connect" syscall.
+	filter := seccomp.Filter{
+		NoNewPrivs: true,
+		Flag:       seccomp.FilterFlagTSync,
+		Policy: seccomp.Policy{
+			// Allow all syscalls by default.
+			DefaultAction: seccomp.ActionAllow,
+			// Trace the "connect" syscall.
+			Syscalls: []seccomp.SyscallGroup{
+				{
+					Action: seccomp.ActionTrace,
+					Names: []string{
+						"connect",
+					},
+				},
+			},
+		},
+	}
+
+	// Load the filter.
+	if err := seccomp.LoadFilter(filter); err != nil {
+		return fmt.Errorf("failed to load seccomp filter: %w", err)
+	}
+	return nil
 }
