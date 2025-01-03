@@ -229,11 +229,10 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 			exitAddr.Store(record.PID, IPPort)
 			log.Infof("Redirecting connections from %v to %v", IPPort, cfg.SocksTCP)
 			err := RedirectConns(record.Syscall.Args, cfg, record)
-
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
-			
+
 			// TODO: handle invalid flag
 			// Incase trans proxy will require a different implementation a switch will be used.
 			return nil
@@ -247,7 +246,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	return nil
 }
 
-// ParseAddress reads an sockaddr struct from the given address and converts it
+// ParseAddress reads an sockaddr struct from the given address and converts it,
 // to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
 // addresses
 func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
@@ -495,7 +494,6 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	case "socks5":
 		const timeout = 10
 		cl, err := socks5.NewClient(IPPort, username, password, timeout, timeout)
-
 		if err != nil {
 			return err
 		}
