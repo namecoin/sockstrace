@@ -674,6 +674,6 @@ func setupSeccomp() error {
 	if err := seccomp.LoadFilter(filter); err != nil {
 		return fmt.Errorf("failed to load seccomp filter: %w", err)
 	}
-	
+
 	return nil
 }
