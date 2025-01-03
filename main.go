@@ -149,7 +149,7 @@ func main() {
 	// Setup seccomp to trace the "connect" syscall.
 	if err := setupSeccomp(); err != nil {
 		panic(err)
-	}
+	}git config --global user.email "you@example.com"
 
 	// Start the program with tracing and handle the CONNECT system call events.
 	if err := strace.New(program, true, func(t strace.Task, record *strace.TraceRecord) error {
