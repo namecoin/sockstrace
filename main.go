@@ -228,6 +228,7 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 		if cfg.Redirect != "" {
 			exitAddr.Store(record.PID, IPPort)
 			log.Infof("Redirecting connections from %v to %v", IPPort, cfg.SocksTCP)
+
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
@@ -493,6 +494,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	switch cfg.Redirect {
 	case "socks5":
 		const timeout = 10
+
 		cl, err := socks5.NewClient(IPPort, username, password, timeout, timeout)
 		if err != nil {
 			return err
