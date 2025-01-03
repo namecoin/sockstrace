@@ -49,11 +49,12 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/hlandau/dexlogconfig"     //nolint:depguard // Required for logging configuration
-	"github.com/hlandau/xlog"             //nolint:depguard // Required for logging
-	"github.com/oraoto/go-pidfd"          //nolint:depguard // Required for pidfd operations
-	"github.com/robertmin1/socks5/v4"     //nolint:depguard // Required for SOCKS5 proxy operations
-	"github.com/u-root/u-root/pkg/strace" //nolint:depguard // Required for system call tracing
+	seccomp "github.com/elastic/go-seccomp-bpf" //nolint:depguard // Required for seccomp-tracing
+	"github.com/hlandau/dexlogconfig"           //nolint:depguard // Required for logging configuration
+	"github.com/hlandau/xlog"                   //nolint:depguard // Required for logging
+	"github.com/oraoto/go-pidfd"                //nolint:depguard // Required for pidfd operations
+	"github.com/robertmin1/socks5/v4"           //nolint:depguard // Required for SOCKS5 proxy operations
+	"github.com/u-root/u-root/pkg/strace"       //nolint:depguard // Required for system call tracing
 	"golang.org/x/sys/unix"
 	easyconfig "gopkg.in/hlandau/easyconfig.v1"
 )
@@ -92,7 +93,7 @@ type Config struct {
 	WhitelistLoopback bool     `default:"false"           usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
 }
 
-// FullAddress is the network address and port
+// FullAddress is the network address and port.
 type FullAddress struct {
 	// Addr is the network address.
 	Addr string
@@ -145,8 +146,13 @@ func main() {
 		cfg.Proxypass = password
 	}
 
+	// Setup seccomp to trace the "connect" syscall.
+	if err := setupSeccomp(); err != nil {
+		panic(err)
+	}
+
 	// Start the program with tracing and handle the CONNECT system call events.
-	if err := strace.Trace(program, func(t strace.Task, record *strace.TraceRecord) error {
+	if err := strace.New(program, true, func(t strace.Task, record *strace.TraceRecord) error {
 		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
 			if err := HandleConnect(t, record, program, cfg); err != nil {
 				return err
@@ -212,22 +218,25 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 
 			return nil
 		}
+
 		if cfg.KillProg {
 			KillApp(program, IPPort)
 
 			return nil
 		}
+
 		if cfg.Redirect != "" {
 			exitAddr.Store(record.PID, IPPort)
 			log.Infof("Redirecting connections from %v to %v", IPPort, cfg.SocksTCP)
+
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
 
-			return nil
 			// TODO: handle invalid flag
 			// Incase trans proxy will require a different implementation a switch will be used.
+			return nil
 		}
 
 		err := BlockSyscall(record.PID, IPPort)
@@ -239,9 +248,8 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 	return nil
 }
 
-// ParseAddress reads an sockaddr struct from the given address and converts it
-// to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
-// addresses
+// ParseAddress converts a sockaddr struct to FullAddress format.
+// It supports AF_UNIX, AF_INET, and AF_INET6 addresses.
 func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
@@ -486,6 +494,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	switch cfg.Redirect {
 	case "socks5":
 		const timeout = 10
+
 		cl, err := socks5.NewClient(IPPort, username, password, timeout, timeout)
 		if err != nil {
 			return err
@@ -566,6 +575,7 @@ func (i FullAddress) String() string {
 func GenerateRandomCredentials() (string, error) {
 	const credentialLength = 48
 	bytes := make([]byte, credentialLength)
+
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
@@ -642,4 +652,32 @@ func (h *HTTPDialer) Dial(_, addr string, httpconn net.Conn) (net.Conn, error) {
 	}
 
 	return conn, nil
+}
+
+func setupSeccomp() error {
+	// Create a seccomp filter for tracing the "connect" syscall.
+	filter := seccomp.Filter{
+		NoNewPrivs: true,
+		Flag:       seccomp.FilterFlagTSync,
+		Policy: seccomp.Policy{
+			// Allow all syscalls by default.
+			DefaultAction: seccomp.ActionAllow,
+			// Trace the "connect" syscall.
+			Syscalls: []seccomp.SyscallGroup{
+				{
+					Action: seccomp.ActionTrace,
+					Names: []string{
+						"connect",
+					},
+				},
+			},
+		},
+	}
+
+	// Load the filter.
+	if err := seccomp.LoadFilter(filter); err != nil {
+		return fmt.Errorf("failed to load seccomp filter: %w", err)
+	}
+
+	return nil
 }
