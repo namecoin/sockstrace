@@ -218,11 +218,13 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 
 			return nil
 		}
+
 		if cfg.KillProg {
 			KillApp(program, IPPort)
 
 			return nil
 		}
+
 		if cfg.Redirect != "" {
 			exitAddr.Store(record.PID, IPPort)
 			log.Infof("Redirecting connections from %v to %v", IPPort, cfg.SocksTCP)
@@ -493,6 +495,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	case "socks5":
 		const timeout = 10
 		cl, err := socks5.NewClient(IPPort, username, password, timeout, timeout)
+
 		if err != nil {
 			return err
 		}
@@ -572,6 +575,7 @@ func (i FullAddress) String() string {
 func GenerateRandomCredentials() (string, error) {
 	const credentialLength = 48
 	bytes := make([]byte, credentialLength)
+
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
