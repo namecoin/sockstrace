@@ -35,7 +35,6 @@ import (
 	"errors"
 	"fmt"
 	go_log "log"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -363,37 +362,25 @@ func SetEnv(cfg Config) string {
 }
 
 // Blocking a syscall by changing the syscall number, converting it to a syscall that doesn't exist.
-func BlockSyscall(pid int, ipport string) error {
-	// Trace the syscall
-	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("error while tracing syscall for process with PID %d: %w", pid, err)
+func BlockSyscall(pid int, ip string) error {
+	// Get the current register values.
+	var regs unix.PtraceRegs
+	if err := unix.PtraceGetRegs(pid, &regs); err != nil {
+		return fmt.Errorf("failed to get registers: %w", err)
 	}
 
-	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
+	// Set an invalid syscall number.
+	regs.Orig_rax = ^uint64(0) // -1, invalid syscall.
+	if err := unix.PtraceSetRegs(pid, &regs); err != nil {
+		return fmt.Errorf("failed to set registers: %w", err)
 	}
 
-	// Struct to store the current register values from unix.PtraceGetRegs
-	regs := &unix.PtraceRegs{}
-	if err := unix.PtraceGetRegs(pid, regs); err != nil {
-		return fmt.Errorf("error while getting register values from process with PID %d: %w", pid, err)
+	// Continue the process.
+	if err := unix.PtraceSyscall(pid, 0); err != nil {
+		return fmt.Errorf("failed to resume syscall: %w", err)
 	}
-
-	// Set to invalid syscall and set the new register values
-	regs.Rax = math.MaxUint64
-	if err := unix.PtraceSetRegs(pid, regs); err != nil {
-		return fmt.Errorf("error while setting register values for process with PID %d: %w", pid, err)
-	}
-
-	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("error while tracing syscall for process with PID %d: %w", pid, err)
-	}
-
-	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
-	}
-
-	log.Warnf("Blocking -> %v", ipport)
+	
+	fmt.Println("Blocking syscall for PID: ", pid, "IP: ", ip)
 
 	return nil
 }
