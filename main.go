@@ -91,7 +91,7 @@ type Config struct {
 	WhitelistLoopback bool     `default:"false"           usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
 }
 
-// FullAddress is the network address and port
+// FullAddress is the network address and port.
 type FullAddress struct {
 	// Addr is the network address.
 	Addr string
@@ -379,8 +379,8 @@ func BlockSyscall(pid int, ip string) error {
 	if err := unix.PtraceSyscall(pid, 0); err != nil {
 		return fmt.Errorf("failed to resume syscall: %w", err)
 	}
-	
-	fmt.Println("Blocking syscall for PID: ", pid, "IP: ", ip)
+
+	fmt.Printf("Blocking syscall for PID: %d, IP: %s\n", pid, ip)
 
 	return nil
 }
