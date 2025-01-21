@@ -380,7 +380,7 @@ func BlockSyscall(pid int, ip string) error {
 		return fmt.Errorf("failed to resume syscall: %w", err)
 	}
 
-	fmt.Printf("Blocking syscall for PID: %d, IP: %s\n", pid, ip)
+	fmt.Println("Blocking syscall for PID: %d, IP: %s", pid, ip)
 
 	return nil
 }
