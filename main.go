@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	go_log "log"
 	"net"
 	"net/http"
@@ -380,7 +381,7 @@ func BlockSyscall(pid int, ip string) error {
 		return fmt.Errorf("failed to resume syscall: %w", err)
 	}
 
-	fmt.Println("Blocking syscall for PID: %d, IP: %s", pid, ip)
+	log.Println("Blocked syscall for PID: %d, IP: %s", pid, ip)
 
 	return nil
 }
