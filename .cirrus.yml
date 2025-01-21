@@ -6,14 +6,14 @@ task:
     - go mod tidy
     - go generate ./...
     - go mod tidy
-  lint_script: golangci-lint run --enable errcheck,govet,ineffassign,staticcheck,structcheck,typecheck,unused,varcheck $GOLANGCI_ARGS -v --out-format json > lint-report.json
+  lint_script: golangci-lint run --enable errcheck,govet,ineffassign,staticcheck,typecheck,unused $GOLANGCI_ARGS -v --out-format json > lint-report.json
   matrix:
     - name: Go Lint New
       env:
         GOLANGCI_ARGS: "--new-from-rev=HEAD~"
     - name: Go Lint Mandatory
       env:
-        GOLANGCI_ARGS: "--disable=cyclop,dupl,gci,godox,goerr113,gomnd,gosimple,ifshort,lll,nosnakecase,revive,varnamelen,wrapcheck"
+        GOLANGCI_ARGS: "--disable=cyclop,dupl,gci,godox,err113,gomnd,gosimple,lll,revive,varnamelen,wrapcheck"
     - name: Go Lint
       env:
         GOLANGCI_ARGS: ""
