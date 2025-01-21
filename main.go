@@ -35,7 +35,6 @@ import (
 	"errors"
 	"fmt"
 	go_log "log"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -84,12 +83,12 @@ type Config struct {
 	Args              []string `usage:"Program Arguments"`
 	KillProg          bool     `default:"false"           usage:"Kill the Program in case of a Proxy Leak (bool)"`
 	LogLeaks          bool     `default:"false"           usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
-	EnvVar            bool     `default:"true"            usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"` //nolint:lll
-	Redirect          string   `default:"socks5"          usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`   //nolint:lll
+	EnvVar            bool     `default:"true"            usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
+	Redirect          string   `default:"socks5"          usage:"Incase of leak redirect to the desired proxy(socks5,http,trans)"`
 	Proxyuser         string   `default:""                usage:"Proxy username in case of proxy redirection"`
 	Proxypass         string   `default:""                usage:"Proxy password in case of proxy redirection"`
 	OneCircuit        bool     `default:"false"           usage:"Disable random SOCKS behavior"`
-	WhitelistLoopback bool     `default:"false"           usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"` //nolint:lll
+	WhitelistLoopback bool     `default:"false"           usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"`
 }
 
 // FullAddress is the network address and port
@@ -212,22 +211,25 @@ func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.C
 
 			return nil
 		}
+
 		if cfg.KillProg {
 			KillApp(program, IPPort)
 
 			return nil
 		}
+
 		if cfg.Redirect != "" {
 			exitAddr.Store(record.PID, IPPort)
 			log.Infof("Redirecting connections from %v to %v", IPPort, cfg.SocksTCP)
+
 			err := RedirectConns(record.Syscall.Args, cfg, record)
 			if err != nil {
 				return fmt.Errorf("failed to redirect connections: %w", err)
 			}
 
-			return nil
 			// TODO: handle invalid flag
 			// Incase trans proxy will require a different implementation a switch will be used.
+			return nil
 		}
 
 		err := BlockSyscall(record.PID, IPPort)
@@ -363,37 +365,29 @@ func SetEnv(cfg Config) string {
 }
 
 // Blocking a syscall by changing the syscall number, converting it to a syscall that doesn't exist.
-func BlockSyscall(pid int, ipport string) error {
-	// Trace the syscall
-	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("error while tracing syscall for process with PID %d: %w", pid, err)
+func BlockSyscall(pid int, ipAddress string) error {
+	// Get the current register values.
+	var regs unix.PtraceRegs
+	if err := unix.PtraceGetRegs(pid, &regs); err != nil {
+		return fmt.Errorf("failed to get registers: %w", err)
 	}
 
-	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
+	// Set an invalid syscall number.
+	regs.Orig_rax = ^uint64(0) // -1, invalid syscall.
+	if err := unix.PtraceSetRegs(pid, &regs); err != nil {
+		return fmt.Errorf("failed to set registers: %w", err)
 	}
 
-	// Struct to store the current register values from unix.PtraceGetRegs
-	regs := &unix.PtraceRegs{}
-	if err := unix.PtraceGetRegs(pid, regs); err != nil {
-		return fmt.Errorf("error while getting register values from process with PID %d: %w", pid, err)
+	// Continue the process.
+	if err := unix.PtraceSyscall(pid, 0); err != nil {
+		return fmt.Errorf("failed to resume syscall: %w", err)
 	}
 
-	// Set to invalid syscall and set the new register values
-	regs.Rax = math.MaxUint64
-	if err := unix.PtraceSetRegs(pid, regs); err != nil {
-		return fmt.Errorf("error while setting register values for process with PID %d: %w", pid, err)
+	if ipAddress == "" {
+		log.Warnf("Blocked syscall for PID %d", pid)
+	} else {
+		log.Warnf("Blocked syscall for PID %d and IP %s", pid, ipAddress)
 	}
-
-	if err := syscall.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("error while tracing syscall for process with PID %d: %w", pid, err)
-	}
-
-	if err := unix.Waitid(unix.P_PID, pid, nil, unix.WEXITED, nil); err != nil {
-		return fmt.Errorf("error while waiting for process with PID %d: %w", pid, err)
-	}
-
-	log.Warnf("Blocking -> %v", ipport)
 
 	return nil
 }
@@ -486,6 +480,7 @@ func Socksify(args strace.SyscallArguments, record *strace.TraceRecord, t strace
 	switch cfg.Redirect {
 	case "socks5":
 		const timeout = 10
+
 		cl, err := socks5.NewClient(IPPort, username, password, timeout, timeout)
 		if err != nil {
 			return err
@@ -566,6 +561,7 @@ func (i FullAddress) String() string {
 func GenerateRandomCredentials() (string, error) {
 	const credentialLength = 48
 	bytes := make([]byte, credentialLength)
+
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
