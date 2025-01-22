@@ -6,9 +6,12 @@ task:
     - go mod tidy
     - go generate ./...
     - go mod tidy
+  install_script:
+    - apt-get update
+    - apt-get install -y libseccomp-dev pkg-config build-essential
   # interfacebloat complains about miekg/pkcs11 API's that we can't change.
   # nosnakecase complains about miekg/pkcs11 API's that we can't change.
-  lint_script: golangci-lint run --enable-all --disable exhaustivestruct,exhaustruct,gochecknoglobals,gochecknoinits,interfacebloat,nosnakecase,gomoddirectives,lll,godot $GOLANGCI_ARGS -v --out-format json > lint-report.json
+  lint_script: golangci-lint run --enable-all --disable exhaustivestruct,exhaustruct,gochecknoglobals,gochecknoinits,interfacebloat,nosnakecase,gomoddirectives,lll,godot,tagalign,godox $GOLANGCI_ARGS -v --out-format json > lint-report.json
   matrix:
     - name: Go Lint New
       env:
