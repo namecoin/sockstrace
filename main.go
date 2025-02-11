@@ -1,65 +1,54 @@
-// Copyright 2022 Namecoin Developers.
-
-// This file is part of heteronculous-horklump.
-//
-// heteronculous-horklump is free software: you can redistribute it and/or
-// modify it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// heteronculous-horklump is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with heteronculous-horklump.  If not, see
-// <https://www.gnu.org/licenses/>.
-
 package main
 
-/*
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <stdlib.h>
-#include <string.h>
-*/
-import "C"
-
 import (
-	"bufio"
-	"bytes"
-	"crypto/rand"
-	"encoding/binary"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	go_log "log"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
-	"strings"
-	"sync"
 	"syscall"
+	"bytes"
+	"encoding/binary"
+	"strings"
+	"bufio"
+	"net/http"
+	"net/url"
+	"crypto/rand"
+	"encoding/hex"
 	"time"
-	"unsafe"
 
-	"github.com/hlandau/dexlogconfig"              //nolint:depguard // Required for logging configuration
-	"github.com/hlandau/xlog"                      //nolint:depguard // Required for logging
-	"github.com/oraoto/go-pidfd"                   //nolint:depguard // Required for pidfd operations
-	"github.com/robertmin1/socks5/v4"              //nolint:depguard // Required for SOCKS5 proxy operations
-	seccomp "github.com/seccomp/libseccomp-golang" //nolint:depguard // Required for seccomp filtering
-	"github.com/u-root/u-root/pkg/strace"          //nolint:depguard // Required for system call tracing
+	libseccomp "github.com/seccomp/libseccomp-golang"
+	"github.com/oraoto/go-pidfd"
+	"github.com/spf13/cobra"
+	"github.com/robertmin1/socks5/v4"
+	"github.com/rs/zerolog"
 	"golang.org/x/sys/unix"
-	easyconfig "gopkg.in/hlandau/easyconfig.v1"
+)
+
+// SyscallHandler defines the handler function for a syscall notification.
+type SyscallHandler func(fd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32)
+
+var (
+	socksTCPv4        string
+	socksTCPv6        string
+	args              []string
+	killProg          bool
+	logLeaks          bool
+	envVar            bool
+	redirect          string
+	proxyUser         string
+	proxyPass         string
+	oneCircuit        bool
+	whitelistLoopback bool
+	allowNonTCP		  bool
 )
 
 var (
-	log, _            = xlog.New("horklump")
+	proxySockaddr4 unix.Sockaddr // IPv4 proxy sockaddr
+	proxySockaddr6 unix.Sockaddr // IPv6 proxy sockaddr
+)
+
+var (
 	UDPProtolNum byte = 0x11
 	nullByte          = "\x00"
 )
@@ -67,33 +56,6 @@ var (
 var authData []struct {
 	username string
 	password string
-}
-
-var exitAddr sync.Map
-
-var ErrUnsupportedProxyType = errors.New("unsupported proxy type")
-
-type HTTPDialer struct {
-	Host     string
-	Username string
-	Password string
-}
-
-// Config is a struct to store the program's configuration values.
-type Config struct {
-	Program           string   `usage:"Program Name"`
-	SocksTCP          string   `default:"127.0.0.1:9050"                usage:"SOCKS TCP address"`
-	Args              []string `usage:"Program Arguments"`
-	KillProg          bool     `default:"false"                         usage:"Kill the Program in case of a Proxy Leak (bool)"`
-	LogLeaks          bool     `default:"true"                          usage:"Allow Proxy Leaks but Log any that Occur (bool)"`
-	EnvVar            bool     `default:"true"                          usage:"Use the Environment Vars TOR_SOCKS_HOST and TOR_SOCKS_PORT (bool)"`
-	Redirect          string   `default:""                              usage:"In case of leak redirect to the desired proxy(socks5,http,trans)"`
-	Proxyuser         string   `default:""                              usage:"Proxy username in case of proxy redirection"`
-	Proxypass         string   `default:""                              usage:"Proxy password in case of proxy redirection"`
-	OneCircuit        bool     `default:"false"                         usage:"Disable random SOCKS behavior"`
-	WhitelistLoopback bool     `default:"false"                         usage:"Whitelist outgoing IP connections to loopback addresses (e.g. 127.0.0.1)"`
-	// TODO: When using seccomp, redirect has to be empty since we currently only intercept entry syscalls
-	Seccomp bool `default:"false"                         usage:"Enable seccomp filtering (bool). Provides a speed bump."`
 }
 
 // FullAddress is the network address and port
@@ -115,154 +77,458 @@ type FullAddress struct {
 	Port uint16
 }
 
+type HTTPDialer struct {
+	Host     string
+	Username string
+	Password string
+}
+
+var logger zerolog.Logger
+
+// Sets up the CLI command structure
+func setupCLI() *cobra.Command {
+	var rootCmd = &cobra.Command{
+		Use:   "sockstrace <program> [flags]",
+		Short: "A CLI tool for managing network proxying and security",
+		Long: `sockstrace allows you to run a program while applying network security features.
+		
+Usage:
+  sockstrace <program> [flags]
+  
+Examples:
+  sockstrace wget
+  sockstrace wget --args example.com
+  sockstrace curl --args "-X POST -d 'data=test' https://example.com"
+  sockstrace wget --args example.com --logleaks true  (Allow Proxy Leaks and log them)
+
+Note:
+  - The first argument must always be the program you want to execute.
+  - Use --args to pass extra arguments to the program.`,
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			stop := initSeccomp()
+			defer close(stop)
+
+			proxyFullAddr4, err := NewFullAddress(socksTCPv4)
+			if err != nil {
+				logger.Fatal().Msgf("Failed to parse Proxy IPv4 address: %v", err)
+			}
+
+			proxyFullAddr6, err := NewFullAddress(socksTCPv6)
+			if err != nil {
+				logger.Fatal().Msgf("Failed to parse Proxy IPv6 address: %v", err)
+			}
+
+			proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
+			proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
+
+			initializeAuthData()
+
+			runProgram(args[0]) // Handle program execution after flags are processed
+		},
+	}
+
+	// Define flags
+	rootCmd.Flags().StringVar(&socksTCPv4, "socks-tcp", "127.0.0.1:9050", "SOCKS TCP4 address")
+	rootCmd.Flags().StringVar(&socksTCPv6, "socks-tcp6", "[::1]:9050", "SOCKS TCP6 address (IPv6)")
+	rootCmd.Flags().StringSliceVar(&args, "args", []string{}, "Arguments to pass to the program")
+	rootCmd.Flags().BoolVar(&killProg, "kill-prog", false, "Kill program on proxy leak (default: false)")
+	rootCmd.Flags().BoolVar(&logLeaks, "logleaks", false, "Allow and log proxy leaks (default: false)")
+	rootCmd.Flags().BoolVar(&envVar, "env-var", true, "Use environment variables for SOCKS")
+	rootCmd.Flags().StringVar(&redirect, "redirect", "socks5", "Redirect leaked connections (options: socks5, http)")
+	rootCmd.Flags().StringVar(&proxyUser, "proxy-user", "", "Proxy username")
+	rootCmd.Flags().StringVar(&proxyPass, "proxy-pass", "", "Proxy password")
+	rootCmd.Flags().BoolVar(&oneCircuit, "one-circuit", false, "Disable random SOCKS behavior (default: false) If a user provides a username or password, those credentials will be used for all connections.")
+	rootCmd.Flags().BoolVar(&whitelistLoopback, "whitelist-loopback", false, "Allow loopback connections (default: false)")
+	rootCmd.Flags().BoolVar(&allowNonTCP, "allow-non-tcp", true, "Allow non-TCP connections (Tor Proxy only supports TCP)")
+
+
+	return rootCmd
+}
+
+func initSeccomp() chan <-struct{} {
+	api, err := libseccomp.GetAPI()
+	if err != nil {
+		logger.Fatal().Msg("Failed to get seccomp API level")
+	} else if api < 5 {
+		logger.Fatal().Msgf("need seccomp API level >= 5; it's currently %d", api)
+	}
+
+	fd, err := LoadFilter()
+	if err != nil {
+		logger.Fatal().Msgf("Failed to load seccomp filter: %v", err)
+	}
+	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
+
+	handlers := map[string]SyscallHandler{"connect": HandleConnect}
+
+	stop, errChan := Handle(fd, handlers)
+	go func() {
+		for err := range errChan {
+			logger.Fatal().Msgf("Error in syscall monitoring: %v", err)
+		}
+	}()
+	return stop
+}
+
 func main() {
-	// Create a Config and initialize it with default values.
-	cfg := Config{}
-	config := easyconfig.Configurator{
-		ProgramName: "horklump",
-	}
+	// Set up the CLI
+	rootCmd := setupCLI()
 
-	config.ParseFatal(&cfg)
-	dexlogconfig.Init()
-	// initialize authData
-	initializeAuthData()
-	// Create a new command struct for the specific program and arguments
-	program := exec.Command(cfg.Program, cfg.Args...)
-	program.Stdin, program.Stdout, program.Stderr = os.Stdin, os.Stdout, os.Stderr
+	logger = zerolog.New(
+		zerolog.ConsoleWriter{
+			Out:        os.Stderr,           // Output to stderr
+			TimeFormat: time.RFC3339,        // Time format
+		},
+	).Level(zerolog.TraceLevel).With().Timestamp().Caller().Logger()
 
-	if cfg.EnvVar {
-		cfg.SocksTCP = SetEnv(cfg)
-	}
-
-	if cfg.Seccomp {
-		if cfg.Redirect != "" {
-			// TODO: Find a way to intercept the exit of the connect syscall.
-			log.Errorf("\033[31mSeccomp filtering cannot be enabled with Socksification (Redirect flag). Please disable one of them.\033[0m")
-
-			return
-		}
-		// Setup seccomp filtering.
-		if err := setupSeccomp(); err != nil {
-			panic(err)
-		}
-
-		log.Warnf("\033[33mSeccomp filtering enabled\033[0m")
-	}
-
-	// Start the program with tracing and handle the CONNECT system call events.
-	if err := strace.New(program, cfg.Seccomp, func(task strace.Task, record *strace.TraceRecord) error {
-		// TODO: Seccomp filtering intrecepts entries (Find a good way to track entry and exit)
-		if cfg.Seccomp && record.Event == strace.SyscallExit {
-			record.Event = strace.SyscallEnter
-		}
-
-		if record.Event == strace.SyscallEnter && record.Syscall.Sysno == unix.SYS_CONNECT {
-			if err := HandleConnect(task, record, program, cfg); err != nil {
-				return err
-			}
-		} else if record.Event == strace.SyscallExit && record.Syscall.Sysno == unix.SYS_CONNECT {
-			_, ok := exitAddr.Load(record.PID)
-			if ok {
-				if err := Socksify(record, cfg); err != nil {
-					return err
-				}
-			}
-		}
-
-		return nil
-	}); err != nil {
-		panic(err)
+	// Execute the CLI command
+	if err := rootCmd.Execute(); err != nil {
+		logger.Fatal().Msgf("Error executing program: %v", err)
 	}
 }
 
-func IsIPAddressAllowed(address FullAddress, cfg Config) bool {
-	if cfg.SocksTCP == address.String() {
+
+func runProgram(program string) {
+	logger.Info().Msgf("Executing program: %s", program)
+
+	cmd := exec.Command(program, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		logger.Fatal().Msgf("Error executing program: %v", err)
+	}
+}
+
+// LoadFilter initializes the seccomp filter, loads rules, and returns a notification FD.
+func LoadFilter() (libseccomp.ScmpFd, error) {
+	filter, err := libseccomp.NewFilter(libseccomp.ActAllow)
+	if err != nil {
+		return 0, err
+	}
+
+	// Notify on handled syscalls
+	handledSyscalls := map[string]SyscallHandler{
+		"connect": HandleConnect,
+	}
+	for sc := range handledSyscalls {
+		syscallID, err := libseccomp.GetSyscallFromName(sc)
+		if err != nil {
+			return 0, err
+		}
+		if err := filter.AddRule(syscallID, libseccomp.ActNotify); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := filter.Load(); err != nil {
+		return 0, err
+	}
+
+	fd, err := filter.GetNotifFd()
+	if err != nil {
+		return 0, err
+	}
+	return fd, nil
+}
+
+// Handle starts processing syscall notifications for a given FD and handler map.
+func Handle(fd libseccomp.ScmpFd, handlers map[string]SyscallHandler) (chan<- struct{}, <-chan error) {
+	stop := make(chan struct{})
+	errChan := make(chan error)
+
+	go func() {
+		for {
+			req, err := libseccomp.NotifReceive(fd)
+			if err != nil {
+				if err == syscall.ENOENT {
+					logger.Fatal().Msgf("Notification no longer valid: %v", err)
+					continue
+				}
+				logger.Fatal().Msgf("Failed to receive notification: %v", err)
+				errChan <- err
+				if err == unix.ECANCELED {
+					return
+				}
+				continue
+			}
+
+			select {
+			case <-stop:
+				_ = libseccomp.NotifRespond(fd, &libseccomp.ScmpNotifResp{
+					ID:    req.ID,
+					Error: int32(unix.EPERM),
+					Val:   0,
+					Flags: 0,
+				})
+				return
+			default:
+			}
+			err = libseccomp.NotifIDValid(fd, req.ID)
+			if err != nil {
+				logger.Fatal().Msgf("Failed to validate notification ID: %v", err)
+			}
+
+			go func(req *libseccomp.ScmpNotifReq) {
+				syscallName, _ := req.Data.Syscall.GetName()
+				handler, ok := handlers[syscallName]
+				if !ok {
+					logger.Fatal().Msgf("Unknown syscall: %s (PID: %d)", syscallName, req.Pid)
+					_ = libseccomp.NotifRespond(fd, &libseccomp.ScmpNotifResp{
+						ID:    req.ID,
+						Error: int32(unix.ENOSYS),
+						Val:   0,
+						Flags: 0,
+					})
+					return
+				}
+
+				val, errno, flags := handler(fd, req)
+				if err := libseccomp.NotifRespond(fd, &libseccomp.ScmpNotifResp{
+					ID:    req.ID,
+					Error: errno,
+					Val:   val,
+					Flags: flags,
+				}); err != nil {
+					errChan <- err
+				}
+			}(req)
+		}
+	}()
+	return stop, errChan
+}
+
+
+// HandleConnect is a syscall handler for connect.
+func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	logger.Info().Msgf("Intercepted 'connect' syscall from PID %d", req.Pid)
+
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
+
+	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+	mem, err := os.Open(memFile)
+	if err != nil {
+		logger.Fatal().Msgf("failed to open memory file: %v", err)
+	}
+	defer mem.Close()
+
+	// Read the syscall arguments
+	data := make([]byte, req.Data.Args[2])
+	_, err = syscall.Pread(int(mem.Fd()), data, int64(req.Data.Args[1]))
+	if err != nil {
+		logger.Fatal().Msgf("failed to read memory: %v", err)
+	}
+
+	// Parse the address
+	addr, err := ParseAddress(data)
+	if err != nil {
+		logger.Fatal().Msgf("failed to parse address: %v", err)
+	}
+
+	sockfd := req.Data.Args[0]
+	pid := req.Pid
+
+	return handleIPEvent(sockfd, pid, addr)
+}
+
+func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
+	if IsAddressAllowed(address){
+		logger.Info().Msgf("Allowed connection to %s", address.String())
+		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	} else if logLeaks {
+		logger.Warn().Msgf("Proxy Leak detected, but allowed: %s", address.String())
+		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	} else {
+		tgid, err := getTgid(pid)
+		if err != nil {
+			logger.Fatal().Msgf("Error getting tgid: %v", err)
+		}
+
+		if killProg {
+			killProcessByID(tgid)
+		}
+
+		tgidFD, err := pidfd.Open(tgid, 0)
+		if err != nil {
+			logger.Fatal().Msgf("Error opening pidfd %v", err)
+		}
+
+		connFD, err := tgidFD.GetFd(int(fd), 0)
+		if err != nil {
+			logger.Fatal().Msgf("Error getting fd %v", err)
+		}
+		defer unix.Close(connFD)
+
+		if allowNonTCP {
+			// Allow non-TCP connections e.g UDP connections (Tor Proxy only supports TCP)
+			opt, err := syscall.GetsockoptInt(connFD, syscall.SOL_SOCKET, syscall.SO_TYPE)
+			if err != nil {
+				logger.Fatal().Msgf("[fd:%v] syscall.GetsockoptInt failed: %v", fd, err)
+			}
+
+			if opt != syscall.SOCK_STREAM {
+				logger.Info().Msgf("Allowing non-TCP connection : %s", address.String())
+				return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+			}
+		}
+
+		if redirect != "" {
+			proxyAddress := socksTCPv4
+			destinationAddr := proxySockaddr4
+			if address.Family == unix.AF_INET6 {
+				proxyAddress = socksTCPv6
+				destinationAddr = proxySockaddr6
+			}
+
+			logger.Info().Msgf("Redirecting connection from %s to %s\n", address.String(), proxyAddress)
+
+			file := os.NewFile(uintptr(connFD), "")
+
+			conn, err := net.FileConn(file)
+			if err != nil {
+				logger.Fatal().Msgf("Error getting file conn: %v", err)
+			}
+			defer conn.Close() 
+			
+			err = unix.Connect(int(connFD), destinationAddr)
+			if err != nil {
+				if err == unix.EINPROGRESS {
+					logger.Info().Msgf("Connection is in progress, waiting for completion")
+				} else {
+					logger.Fatal().Msgf("Error connecting to tor", err)
+				}
+			}
+			
+			username, password, err := resolveCredentials()
+			if err != nil {
+				logger.Fatal().Msgf("Error resolving credentials: %v", err)
+			}
+
+			switch redirect {
+				case "socks5":
+					err = handleSocks5Proxy(address.String(), username, password, conn)
+				case "http":
+					err = handleHTTPProxy(proxyAddress, address.String(), username, password, conn)
+				default:
+					logger.Fatal().Msg("Invalid redirect option")
+
+			}
+			
+			if err != nil {
+				logger.Fatal().Msgf("Error connecting to %s proxy", redirect, err)
+			}
+		}
+
+		// Default action is to block the connection
+		return 0, 0, 0
+	}
+}
+
+func IsIPAddressAllowed(address FullAddress) bool {
+	if socksTCPv4 == address.String() || socksTCPv6 == address.String() {
 		return true
 	}
 
-	if cfg.WhitelistLoopback && address.IP.IsLoopback() {
+	if whitelistLoopback && address.IP.IsLoopback() {
 		return true
 	}
 
 	return false
 }
 
-func IsAddressAllowed(address FullAddress, cfg Config) bool {
+func IsAddressAllowed(address FullAddress) bool {
 	switch address.Family {
 	case unix.AF_UNIX:
 		return true
 	case unix.AF_INET:
-		return IsIPAddressAllowed(address, cfg)
+		return IsIPAddressAllowed(address)
 	case unix.AF_INET6:
-		return IsIPAddressAllowed(address, cfg)
+		return IsIPAddressAllowed(address)
 	default:
 		return false
 	}
 }
 
-func HandleConnect(task strace.Task, record *strace.TraceRecord, program *exec.Cmd, cfg Config) error {
-	// Parse the IP and Port.
-	address, err := ParseAddress(task, record.Syscall.Args)
-	if err != nil {
-		return fmt.Errorf("failed to parse address: %w", err)
+func (i FullAddress) String() string {
+	switch {
+	case i.IP == nil:
+		return i.Addr
+	case i.IP.To4() != nil:
+		return fmt.Sprintf("%s:%d", i.Addr, i.Port)
+	case i.IP.To16() != nil:
+		return fmt.Sprintf("[%s]:%d", i.Addr, i.Port)
+	default:
+		return i.Addr
 	}
-
-	IPPort := address.String()
-	if IsAddressAllowed(address, cfg) { //nolint
-		log.Warnf("Connecting to %v", IPPort)
-	} else {
-		// Dump Stack Trace and Process Information
-		if err := DumpStackTrace(record.PID); err != nil {
-			return err
-		}
-
-		if cfg.LogLeaks {
-			log.Warnf("\033[33mProxy Leak detected, but allowed : %v\033[0m", IPPort)
-
-			return nil
-		}
-
-		if cfg.KillProg {
-			KillApp(program, IPPort)
-
-			return nil
-		}
-
-		if cfg.Redirect != "" {
-			exitAddr.Store(record.PID, IPPort)
-			log.Warnf("\033[33mRedirecting connections from %v to %v\033[0m", IPPort, cfg.SocksTCP)
-
-			err := RedirectConns(record.Syscall.Args, cfg, record)
-			if err != nil {
-				return fmt.Errorf("failed to redirect connections: %w", err)
-			}
-
-			// TODO: handle invalid flag
-			// Incase trans proxy will require a different implementation a switch will be used.
-			return nil
-		}
-
-		err := BlockSyscall(record.PID, IPPort)
-		if err != nil {
-			return fmt.Errorf("failed to block syscall for PID %d and IPPort %s: %w", record.PID, IPPort, err)
-		}
-	}
-
-	return nil
 }
 
-// ParseAddress reads an sockaddr struct from the given address and converts it
-// to the FullAddress format. It supports AF_UNIX, AF_INET and AF_INET6
-// addresses
-func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, error) { //nolint
-	addr := args[1].Pointer()
-	addrlen := args[2].Uint()
-
-	socketaddr, err := strace.CaptureAddress(t, addr, addrlen)
+func NewFullAddress(address string) (*FullAddress, error) {
+	// Split the address and port using SplitHostPort
+	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
-		return FullAddress{}, fmt.Errorf("failed to parse socket address: %w", err)
+		return nil, fmt.Errorf("failed to split address and port: %v", err)
 	}
 
+	// Parse the IP address (hostname or IP)
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// If it's not a valid IP, resolve the hostname to an IP
+		ipAddr, err := net.ResolveIPAddr("ip", address)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve address: %v", err)
+		}
+		ip = ipAddr.IP
+	}
+
+	// Determine the address family (IPv4 or IPv6)
+	family := uint16(2) // AF_INET (IPv4)
+	if ip.To4() == nil {
+		family = uint16(10) // AF_INET6 (IPv6)
+	}
+
+	// Parse the port
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse port: %v", err)
+	}
+
+
+	// Create the FullAddress object
+	fullAddr := &FullAddress{
+		Addr:   address,
+		IP:     ip,
+		Family: family,
+		Port:   uint16(port),
+	}
+
+	return fullAddr, nil
+}
+
+func netTCPAddrToSockAddr(address FullAddress) unix.Sockaddr {
+	ip := address.IP
+ 	ip4 := ip.To4()
+	if ip4 != nil {
+		return &unix.SockaddrInet4{
+			Port: int(address.Port),
+			Addr: [4]byte{
+				ip4[0], ip4[1], ip4[2], ip4[3],
+			},
+		}
+	}
+
+	return &unix.SockaddrInet6{
+		Port: int(address.Port),
+		Addr: [16]byte{
+			ip[0], ip[1], ip[2], ip[3], ip[4], ip[5], ip[6], ip[7],
+			ip[8], ip[9], ip[10], ip[11], ip[12], ip[13], ip[14], ip[15],
+		},
+	}
+}
+
+func ParseAddress(socketaddr []byte) (FullAddress, error) { //nolint
 	famBuf := bytes.NewBuffer(socketaddr[:2])
 
 	var fam uint16
@@ -345,178 +611,36 @@ func ParseAddress(t strace.Task, args strace.SyscallArguments) (FullAddress, err
 	}
 }
 
-// Kill the application in case of a proxy leak.
-func KillApp(program *exec.Cmd, iPPort string) {
-	err := program.Process.Signal(syscall.SIGKILL)
+// killProcessByID sends a SIGKILL signal to a process with the specified PID or TGID.
+func killProcessByID(pid int) error {
+	// Send SIGKILL to the main process (TGID)
+	err := syscall.Kill(pid, syscall.SIGKILL)
 	if err != nil {
-		log.Errorf("Failed to kill the application: %v", err)
-		panic(err)
+		return fmt.Errorf("failed to kill process with ID %d: %v", pid, err)
 	}
 
-	log.Warnf("Proxy Leak Detected : %v. Killing the Application.", iPPort)
-}
-
-// Setting environment variables.
-func SetEnv(cfg Config) string {
-	host, port := os.Getenv("TOR_SOCKS_HOST"), os.Getenv("TOR_SOCKS_PORT")
-	TCPhost, TCPport, _ := net.SplitHostPort(cfg.SocksTCP)
-
-	// Handling some edge cases, incase only one Environment variable is provided.
-	switch {
-	case (host == "" && port != ""):
-		return TCPhost + ":" + port
-	case (host != "" && port == ""):
-		return host + ":" + TCPport
-	case (host != "" && port != ""):
-		return host + ":" + port
-	default:
-		return cfg.SocksTCP
-	}
-}
-
-// Blocking a syscall by changing the syscall number, converting it to a syscall that doesn't exist.
-func BlockSyscall(pid int, ipAddress string) error {
-	// Get the current register values.
-	var regs unix.PtraceRegs
-	if err := unix.PtraceGetRegs(pid, &regs); err != nil {
-		return fmt.Errorf("failed to get registers: %w", err)
-	}
-
-	// Set an invalid syscall number.
-	regs.Orig_rax = ^uint64(0) // -1, invalid syscall.
-	if err := unix.PtraceSetRegs(pid, &regs); err != nil {
-		return fmt.Errorf("failed to set registers: %w", err)
-	}
-
-	// Continue the process.
-	if err := unix.PtraceSyscall(pid, 0); err != nil {
-		return fmt.Errorf("failed to resume syscall: %w", err)
-	}
-
-	if ipAddress == "" {
-		log.Warnf("Blocked syscall for PID %d", pid)
-	} else {
-		log.Warnf("Blocked syscall for PID %d and IP %s", pid, ipAddress)
-	}
-
+	logger.Warn().Msgf("Successfully killed process with ID %d\n", pid)
 	return nil
 }
 
-func RedirectConns(args strace.SyscallArguments, cfg Config, record *strace.TraceRecord) error {
-	// Extrating the address that holds the IP/Port information
-	addr := args[1].Pointer()
-	addrlen := args[2].Uint()
-	host, port, _ := net.SplitHostPort(cfg.SocksTCP)
-	parsedhost := net.ParseIP(host)
-
-	pokeData := make([]byte, addrlen)
-	// Support for UDP will be implemented
-	// Switch is used to differentiate if the proxy is IPv4/IPv5/UDP/Invalid Proxy
-	switch {
-	// If ip is not IPv4 address, To4 returns nil
-	case parsedhost.To4() != nil:
-		var addrStruct C.struct_sockaddr_in
-		addrStruct.sin_family = C.AF_INET
-		intPort, _ := strconv.Atoi(port)
-		addrStruct.sin_port = C.htons(C.in_port_t(intPort))
-		ip := C.CString(host)
-
-		defer C.free(unsafe.Pointer(ip)) //nolint
-
-		addrStruct.sin_addr.s_addr = C.inet_addr(ip)
-		pokeData = C.GoBytes(unsafe.Pointer(&addrStruct), C.sizeof_struct_sockaddr_in) //nolint
-	// If ip is not IPv6 address, To16 returns nil
-	case parsedhost.To16() != nil:
-		hostData := parsedhost.To16()
-
-		var addrStruct C.struct_sockaddr_in6
-		addrStruct.sin6_family = C.AF_INET6
-		intPort, _ := strconv.Atoi(port)
-		addrStruct.sin6_port = C.htons(C.in_port_t(intPort))
-		C.memcpy(unsafe.Pointer(&addrStruct.sin6_addr), unsafe.Pointer(&hostData[0]), C.size_t(len(hostData))) //nolint
-
-		pokeData = C.GoBytes(unsafe.Pointer(&addrStruct), C.int(unsafe.Sizeof(addrStruct))) //nolint
-	case parsedhost.To4()[0] == UDPProtolNum:
-		log.Error("Support for UDP will be implemented")
-	default:
-		return errors.New("invalid ip address")
-	}
-
-	// Poking our proxy IP/Port to the address containing the original address
-	if _, err := unix.PtracePokeData(record.PID, uintptr(addr), pokeData); err != nil {
-		return fmt.Errorf("error poking data into process with PID %d: %w", record.PID, err)
-	}
-
-	log.Warnf("Connecting to %v", cfg.SocksTCP)
-
-	return nil
-}
-
-func Socksify(record *strace.TraceRecord, cfg Config) error {
-	username, password, err := resolveCredentials(cfg)
+func getTgid(pid uint32) (int, error) {
+	file, err := os.Open(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
-		return fmt.Errorf("error resolving credentials: %w", err)
+		return 0, err
 	}
+	defer file.Close()
 
-	addr, _ := exitAddr.LoadAndDelete(record.PID)
-	IPPort := fmt.Sprintf("%v", addr)
-	fd := record.Syscall.Args[0].Uint()
-
-	p, err := pidfd.Open(record.PID, 0)
-	if err != nil {
-		return fmt.Errorf("error opening PID file descriptor: %w", err)
-	}
-
-	listenfd, err := p.GetFd(int(fd), 0)
-	if err != nil {
-		return fmt.Errorf("error getting listen file descriptor: %w", err)
-	}
-
-	file := os.NewFile(uintptr(listenfd), "")
-
-	conn, err := net.FileConn(file)
-	if err != nil {
-		return fmt.Errorf("error creating connection from file: %w", err)
-	}
-
-	switch cfg.Redirect {
-	case "socks5":
-		return handleSocks5Proxy(IPPort, username, password, conn)
-	case "http":
-		return handleHTTPProxy(cfg.SocksTCP, IPPort, username, password, conn)
-	}
-
-	return fmt.Errorf("%w: %s", ErrUnsupportedProxyType, cfg.Redirect)
-}
-
-func resolveCredentials(cfg Config) (string, string, error) {
-	username, password := cfg.Proxyuser, cfg.Proxypass
-	if username == "" || password == "" {
-		var err error
-
-		username, err = GenerateRandomCredentials()
-		if err != nil {
-			return "", "", fmt.Errorf("failed to generate random username: %w", err)
-		}
-
-		password, err = GenerateRandomCredentials()
-		if err != nil {
-			return "", "", fmt.Errorf("failed to generate random password: %w", err)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Tgid:") {
+			var tgid int
+			fmt.Sscanf(line, "Tgid:\t%d", &tgid)
+			return tgid, nil
 		}
 	}
 
-	if !cfg.OneCircuit {
-		idxBytes := make([]byte, 1)
-		if _, err := rand.Read(idxBytes); err != nil {
-			return "", "", fmt.Errorf("failed to generate random index: %w", err)
-		}
-
-		idx := int(idxBytes[0]) % len(authData)
-		username = authData[idx].username
-		password = authData[idx].password
-	}
-
-	return username, password, nil
+	return 0, fmt.Errorf("tgid not found in /proc/%d/status", pid)
 }
 
 func handleSocks5Proxy(ipPort, username, password string, conn net.Conn) error {
@@ -545,80 +669,6 @@ func handleHTTPProxy(proxyAddr, ipPort, username, password string, conn net.Conn
 	}
 
 	return nil
-}
-
-func DumpStackTrace(pid int) error {
-	// Create or open the log file in append mode
-	logFile, err := os.OpenFile("stack_trace.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint
-	if err != nil {
-		return err
-	}
-
-	defer logFile.Close()
-	// Set the log output to the log file
-	go_log.SetOutput(logFile)
-
-	commPath := fmt.Sprintf("/proc/%d/cmdline", pid)
-
-	commBytes, err := os.ReadFile(commPath)
-	if err != nil {
-		return err
-	}
-	// Split the contents by null byte to separate command and arguments
-	cmdline := strings.Split(string(commBytes), "\x00")
-
-	// Add a separator with date and time for the new instance of the program
-	separator := fmt.Sprintf("----------- New Instance: %s ------------", time.Now().Format("2006-01-02 15:04:05"))
-	go_log.Println(separator)
-
-	// Add the PID and Process Name and Args.
-	go_log.Printf("PID :%v", pid)
-	go_log.Printf("Program and Arguments:%v\n", cmdline)
-
-	// Get the stack trace
-	const stackSize = 8192
-	stack := make([]byte, stackSize) // 8192 bytes
-	length := runtime.Stack(stack, true)
-
-	// Write the stack trace to the log file
-	go_log.Println(string(stack[:length]))
-
-	return nil
-}
-
-func (i FullAddress) String() string {
-	switch {
-	case i.IP == nil:
-		return i.Addr
-	case i.IP.To4() != nil:
-		return fmt.Sprintf("%s:%d", i.Addr, i.Port)
-	case i.IP.To16() != nil:
-		return fmt.Sprintf("[%s]:%d", i.Addr, i.Port)
-	default:
-		return i.Addr
-	}
-}
-
-func GenerateRandomCredentials() (string, error) {
-	const credentialLength = 48
-	bytes := make([]byte, credentialLength)
-
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(bytes), nil
-}
-
-func initializeAuthData() {
-	for range [10]int{} {
-		username, _ := GenerateRandomCredentials()
-		password, _ := GenerateRandomCredentials()
-		authData = append(authData, struct {
-			username string
-			password string
-		}{username, password})
-	}
 }
 
 func NewHTTPClient(addr, username, password string) (*HTTPDialer, error) {
@@ -681,21 +731,56 @@ func (h *HTTPDialer) Dial(_, addr string, httpconn net.Conn) (net.Conn, error) {
 	return conn, nil
 }
 
-func setupSeccomp() error {
-	// Create a new filter with a default action to allow all syscalls.
-	filter, err := seccomp.NewFilter(seccomp.ActAllow)
-	if err != nil {
-		return fmt.Errorf("failed to create seccomp filter: %w", err)
+func resolveCredentials() (string, string, error) {
+	username, password := proxyUser, proxyPass
+	if username == "" && password == "" {
+		var err error
+
+		username, err = GenerateRandomCredentials()
+		if err != nil {
+			return "", "", fmt.Errorf("failed to generate random username: %w", err)
+		}
+
+		password, err = GenerateRandomCredentials()
+		if err != nil {
+			return "", "", fmt.Errorf("failed to generate random password: %w", err)
+		}
+	} else {
+		return username, password, nil
 	}
 
-	if err := filter.AddRule(unix.SYS_CONNECT, seccomp.ActTrace); err != nil {
-		return fmt.Errorf("failed to add connect syscall to seccomp filter: %w", err)
+	if !oneCircuit {
+		idxBytes := make([]byte, 1)
+		if _, err := rand.Read(idxBytes); err != nil {
+			return "", "", fmt.Errorf("failed to generate random index: %w", err)
+		}
+
+		idx := int(idxBytes[0]) % len(authData)
+		username = authData[idx].username
+		password = authData[idx].password
 	}
 
-	// Load the filter into the kernel.
-	if err := filter.Load(); err != nil {
-		return fmt.Errorf("failed to load seccomp filter: %w", err)
+	return username, password, nil
+}
+
+func GenerateRandomCredentials() (string, error) {
+	const credentialLength = 48
+	bytes := make([]byte, credentialLength)
+
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
 	}
 
-	return nil
+	return hex.EncodeToString(bytes), nil
+}
+
+func initializeAuthData() {
+	for range [10]int{} {
+		username, _ := GenerateRandomCredentials()
+		password, _ := GenerateRandomCredentials()
+		authData = append(authData, struct {
+			username string
+			password string
+		}{username, password})
+	}
 }

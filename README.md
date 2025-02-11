@@ -1,5 +1,5 @@
-# heteronculous-horklump
-Go port of Heteronculous (ptrace-based proxy leak detector). Outreachy project.
+# sockstrace
+Go port of Heteronculous (Golang-based proxy leak detector). Outreachy project.
 
 ## Building
 Prerequisites:
@@ -18,41 +18,18 @@ sudo dnf install libseccomp-devel
 ```
 
 ### Using Go build commands with Go modules
-1. Clone [heteronculous-horklump](https://github.com/namecoin/heteronculous-horklump) 
+1. Clone [sockstrace](https://github.com/namecoin/heteronculous-horklump) 
 
 2. Set up Go modules
 ```
 go mod tidy
 ```
 
-3. Install `heteronculous-horklump` using `go build -o tracer main.go`
+3. Install `sockstrace` using `go build -o tracer main.go`
 
 
 ## DEMO
-Assume you are running the SOCKS5 proxy with the default IP address: "localhost:9050". Trace for proxy leaks and Socksify your connecitons by running:
-```
-./tracer -horklump.program wget -horklump.args https://116.202.120.181 -horklump.args --no-check-certificate -horklump.args --header=Host:check.torproject.org -horklump.redirect socks5 -horklump.logleaks false
-```
-Since the default address is `localhost:9050` there is no need to set it.
-
-Assume you are running the tor HTTP proxy with the default IP address: "localhost:9080". Trace for proxy leaks and Socksify your connecitons by running:
-```
-./tracer -horklump.program wget -horklump.args https://116.202.120.181 -horklump.args --no-check-certificate -horklump.args --header=Host:check.torproject.org -horklump.redirect http -horklump.logleaks false
-```
-
-## Further Information
-`CGO is required`: Ensure your environment has CGO enabled.
-
-A `C compiler`, such as `GCC`, is required to build the project.
-
-To install GCC on Debian/Ubuntu:
-```
-sudo apt update && sudo apt install build-essential
-```
-To install GCC on Fedora/RHEL:
-```
-sudo dnf groupinstall "Development Tools"
-```
+TODO
 
 ## Licence
 
