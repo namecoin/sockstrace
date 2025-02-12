@@ -85,6 +85,51 @@ type HTTPDialer struct {
 
 var logger zerolog.Logger
 
+var whitelist = []string{"ioctl", "getrandom", "pciconfig_read", "pciconfig_write", "sysctl", "membarrier", 
+						"syslog", "bpf", "setgroups", "uname", "getcpu", "sysinfo", "personality", "ptrace", 
+						"kexec_file_load", "kexec_load", "reboot", "delete_module", "init_module", "finit_module",
+						"perf_event_op", "rseq", // System syscalls
+						"futimesat", "utimes", "gettimeofday", "settimeofday", "getitimer", "setitimer", 
+						"clock_settime", "clock_gettime", "clock_getres", "clock_nanosleep", "time", "stime", 
+						"nanosleep", "timer_create", "timer_gettime", "timer_getoverrun", "timer_settime", 
+						"timer_delete", "timerfd_create", "timerfd_settime", "timerfd_gettime", "eventfd2", 
+						"eventfd", "utime", "times", "clock_adjtime", "adjtimex", // Time syscalls
+						"fork", "vfork", "brk", "getpid", "getppid", "getpgrp", "execve", "execveat", "nice", 
+						"getgroups", "getgid", "setgid", "getuid", "setuid", "getresuid", "setresuid", "getresgid", 
+						"setresgid", "getsid", "setsid", "setpgid", "getpgid", "getegid", "geteuid", "setreuid", 
+						"setregid", "pause", "alarm", "acct", "prctl", "clone", "sched_setscheduler", "sched_setparam", 
+						"sched_setattr", "sched_getscheduler", "sched_getparam", "sched_getattr", "sched_setaffinity",
+						"sched_rr_get_interval", "unshare", "setns", "sched_getaffinity", "sched_yield", "sched_get_priority_max", 
+						"sched_get_priority_min", "set_tid_address", "exit_group", "setpriority", "getpriority", 
+						"getrlimit", "setrlimit", "getrusage", "gettid", "kcmp", "capget", "capset", "exit", // Process syscalls
+						"semget", "semctl", "semtimedop", "semop", "mq_open", "mq_unlink", "mq_timedsend", "mq_timedreceive", 
+						"mq_notify", "msgget", "msgctl", "msgsnd", "msgrcv", "waitid", "wait4", "waitpid", "signalfd4", 
+						"signalfd", "kill", "sigtimedwait", "sigaltstack", "sigpending", "sigprocmask", "sigaction", 
+						"signal", "sigsuspend", "futex", "set_robust_list", "get_robust_list", "restart_syscall",
+						"tgkill", "rt_sigqueueinfo", "rt_tgsigqueueinfo", "mq_getsetattr", // Synchronization syscalls
+						"mbind", "set_mempolicy", "migrate_pages", "get_mempolicy", "move_pages", "msync", "mincore", 
+						"munmap", "remap_file_pages", "mremap", "mlock", "mlock2", "munlock", "mlockall", "munlockall", 
+						"mprotect", "pkey_mprotect", "pkey_alloc", "pkey_free", "madvise", "shmget", "shmctl", "shmat", 
+						"shmdt", "swapoff", "swapon", "memfd_create", // Memory syscalls
+						"setfsuid", "setfsgid", "add_key", "request_key", "keyctl", "seccomp", // Security syscalls
+						"stat", "statfs", "fstatfs", "inotify_init1", "inotify_init", "inotify_add_watch", "inotify_rm_watch", 
+						"fanotify_init", "fanotify_mark", "setxattr", "lsetxattr", "fsetxattr", "getxattr", "lgetxattr", 
+						"fgetxattr", "listxattr", "llistxattr", "flistxattr", "removexattr", "lremovexattr", "fremovexattr", 
+						"quotactl", "renameat", "rename", "statx", "io_getevents", "io_pgetevents", "fsopen", "fspick",
+						"lookup_dcookie", "renameat2", "fsinfo", "open_tree", "fsmount", "move_mount", "pivot_root", "getdents",
+						"vmsplice", "name_to_handle_at", "open_by_handle_at", "pselect6", "userfaultfd", "mmap_pgoff",
+						"ioprio_set", "ioprio_get", // Metadata syscalls
+						"open", "openat", "fcntl", "sync_file_range", "fallocate", "creat", "splice", "tee", "readahead", 
+						"truncate", "ftruncate", "faccessat", "access", "fchdir", "chdir", "chroot", "fchownat", "chown", 
+						"lchown", "fchown", "close", "vhangup", "pipe", "pipe2", "sync", "syncfs", "fsync", "fdatasync", 
+						"dup", "dup2", "dup3", "lseek", "read", "write", "copy_file_range", "readv", "writev", "preadv", 
+						"pwritev", "preadv2", "pwritev2", "process_vm_readv", "process_vm_writev", "flock", "mount", "umount", // Data syscalls
+						"epoll_create1", "epoll_create", "epoll_ctl", "epoll_wait", "epoll_pwait", "select", "poll", 
+						"ppoll", "io_setup", "io_destroy", "io_submit", "io_cancel", // Non-blocking I/O syscalls
+						"socket", "socketpair", "bind", "listen", "accept", "accept4", "getsockname", "getpeername", 
+						"send", "recv", "sendto", "recvfrom", "setsockopt", "getsockopt", "shutdown", "sendmsg", 
+						"sendmmsg", "recvmsg", "recvmmsg", "socketcall", "sendfile", "sethostname", "gethostname", "setdomainname",} // Network syscalls (excluding connect)
+
 // Sets up the CLI command structure
 func setupCLI() *cobra.Command {
 	var rootCmd = &cobra.Command{
@@ -207,6 +252,17 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 		return 0, err
 	}
 
+	// Allow on whitelist syscalls
+	for sc := range whitelist {
+		syscallID, err := libseccomp.GetSyscallFromName(whitelist[sc])
+		if err != nil {
+			return 0, err
+		}
+		if err := filter.AddRule(syscallID, libseccomp.ActAllow); err != nil {
+			return 0, err
+		}
+	}
+
 	// Notify on handled syscalls
 	handledSyscalls := map[string]SyscallHandler{
 		"connect": HandleConnect,
@@ -233,7 +289,7 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 }
 
 // Handle starts processing syscall notifications for a given FD and handler map.
-func Handle(fd libseccomp.ScmpFd, handlers map[string]SyscallHandler) (chan<- struct{}, <-chan error) {
+func  Handle(fd libseccomp.ScmpFd, handlers map[string]SyscallHandler) (chan<- struct{}, <-chan error) {
 	stop := make(chan struct{})
 	errChan := make(chan error)
 
