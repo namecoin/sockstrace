@@ -289,7 +289,7 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 }
 
 // Handle starts processing syscall notifications for a given FD and handler map.
-func  Handle(fd libseccomp.ScmpFd, handlers map[string]SyscallHandler) (chan<- struct{}, <-chan error) {
+func Handle(fd libseccomp.ScmpFd, handlers map[string]SyscallHandler) (chan<- struct{}, <-chan error) {
 	stop := make(chan struct{})
 	errChan := make(chan error)
 
