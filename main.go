@@ -286,7 +286,7 @@ func runProgram(program string) {
 
 // LoadFilter initializes the seccomp filter, loads rules, and returns a notification FD.
 func LoadFilter() (libseccomp.ScmpFd, error) {
-	filter, err := libseccomp.NewFilter(libseccomp.ActAllow)
+	filter, err := libseccomp.NewFilter(libseccomp.ActErrno.SetReturnCode(int16(unix.EPERM)))
 	if err != nil {
 		return 0, err
 	}
