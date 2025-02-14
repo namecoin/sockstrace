@@ -1,27 +1,27 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
-	"syscall"
-	"bytes"
-	"encoding/binary"
 	"strings"
-	"bufio"
-	"net/http"
-	"net/url"
-	"crypto/rand"
-	"encoding/hex"
+	"syscall"
 	"time"
 
-	libseccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/oraoto/go-pidfd"
-	"github.com/spf13/cobra"
 	"github.com/robertmin1/socks5/v4"
 	"github.com/rs/zerolog"
+	libseccomp "github.com/seccomp/libseccomp-golang"
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 )
 
@@ -85,50 +85,89 @@ type HTTPDialer struct {
 
 var logger zerolog.Logger
 
-var whitelist = []string{"ioctl", "getrandom", "pciconfig_read", "pciconfig_write", "sysctl", "membarrier", 
-						"syslog", "bpf", "setgroups", "uname", "getcpu", "sysinfo", "personality", "ptrace", 
-						"kexec_file_load", "kexec_load", "reboot", "delete_module", "init_module", "finit_module",
-						"perf_event_op", "rseq", // System syscalls
-						"futimesat", "utimes", "gettimeofday", "settimeofday", "getitimer", "setitimer", 
-						"clock_settime", "clock_gettime", "clock_getres", "clock_nanosleep", "time", "stime", 
-						"nanosleep", "timer_create", "timer_gettime", "timer_getoverrun", "timer_settime", 
-						"timer_delete", "timerfd_create", "timerfd_settime", "timerfd_gettime", "eventfd2", 
-						"eventfd", "utime", "times", "clock_adjtime", "adjtimex", // Time syscalls
-						"fork", "vfork", "brk", "getpid", "getppid", "getpgrp", "execve", "execveat", "nice", 
-						"getgroups", "getgid", "setgid", "getuid", "setuid", "getresuid", "setresuid", "getresgid", 
-						"setresgid", "getsid", "setsid", "setpgid", "getpgid", "getegid", "geteuid", "setreuid", 
-						"setregid", "pause", "alarm", "acct", "prctl", "clone", "sched_setscheduler", "sched_setparam", 
-						"sched_setattr", "sched_getscheduler", "sched_getparam", "sched_getattr", "sched_setaffinity",
-						"sched_rr_get_interval", "unshare", "setns", "sched_getaffinity", "sched_yield", "sched_get_priority_max", 
-						"sched_get_priority_min", "set_tid_address", "exit_group", "setpriority", "getpriority", 
-						"getrlimit", "setrlimit", "getrusage", "gettid", "kcmp", "capget", "capset", "exit", // Process syscalls
-						"semget", "semctl", "semtimedop", "semop", "mq_open", "mq_unlink", "mq_timedsend", "mq_timedreceive", 
-						"mq_notify", "msgget", "msgctl", "msgsnd", "msgrcv", "waitid", "wait4", "waitpid", "signalfd4", 
-						"signalfd", "kill", "sigtimedwait", "sigaltstack", "sigpending", "sigprocmask", "sigaction", 
-						"signal", "sigsuspend", "futex", "set_robust_list", "get_robust_list", "restart_syscall",
-						"tgkill", "rt_sigqueueinfo", "rt_tgsigqueueinfo", "mq_getsetattr", // Synchronization syscalls
-						"mbind", "set_mempolicy", "migrate_pages", "get_mempolicy", "move_pages", "msync", "mincore", 
-						"munmap", "remap_file_pages", "mremap", "mlock", "mlock2", "munlock", "mlockall", "munlockall", 
-						"mprotect", "pkey_mprotect", "pkey_alloc", "pkey_free", "madvise", "shmget", "shmctl", "shmat", 
-						"shmdt", "swapoff", "swapon", "memfd_create", // Memory syscalls
-						"setfsuid", "setfsgid", "add_key", "request_key", "keyctl", "seccomp", // Security syscalls
-						"stat", "statfs", "fstatfs", "inotify_init1", "inotify_init", "inotify_add_watch", "inotify_rm_watch", 
-						"fanotify_init", "fanotify_mark", "setxattr", "lsetxattr", "fsetxattr", "getxattr", "lgetxattr", 
-						"fgetxattr", "listxattr", "llistxattr", "flistxattr", "removexattr", "lremovexattr", "fremovexattr", 
-						"quotactl", "renameat", "rename", "statx", "io_getevents", "io_pgetevents", "fsopen", "fspick",
-						"lookup_dcookie", "renameat2", "fsinfo", "open_tree", "fsmount", "move_mount", "pivot_root", "getdents",
-						"vmsplice", "name_to_handle_at", "open_by_handle_at", "pselect6", "userfaultfd", "mmap_pgoff",
-						"ioprio_set", "ioprio_get", // Metadata syscalls
-						"open", "openat", "fcntl", "sync_file_range", "fallocate", "creat", "splice", "tee", "readahead", 
-						"truncate", "ftruncate", "faccessat", "access", "fchdir", "chdir", "chroot", "fchownat", "chown", 
-						"lchown", "fchown", "close", "vhangup", "pipe", "pipe2", "sync", "syncfs", "fsync", "fdatasync", 
-						"dup", "dup2", "dup3", "lseek", "read", "write", "copy_file_range", "readv", "writev", "preadv", 
-						"pwritev", "preadv2", "pwritev2", "process_vm_readv", "process_vm_writev", "flock", "mount", "umount", // Data syscalls
-						"epoll_create1", "epoll_create", "epoll_ctl", "epoll_wait", "epoll_pwait", "select", "poll", 
-						"ppoll", "io_setup", "io_destroy", "io_submit", "io_cancel", // Non-blocking I/O syscalls
-						"socket", "socketpair", "bind", "listen", "accept", "accept4", "getsockname", "getpeername", 
-						"send", "recv", "sendto", "recvfrom", "setsockopt", "getsockopt", "shutdown", "sendmsg", 
-						"sendmmsg", "recvmsg", "recvmmsg", "socketcall", "sendfile", "sethostname", "gethostname", "setdomainname",} // Network syscalls (excluding connect)
+// The whitelist is obtained from:
+// https://en.wikibooks.org/wiki/The_Linux_Kernel/Syscalls
+// https://filippo.io/linux-syscall-table/
+//
+// The "connect" syscalls are excluded since we are handling them differently.
+// The "gethostname" syscall is in the first link but doesn't seem to be supported.
+var whitelist = []string{
+	// System
+	"syslog", "sysinfo", "sysfs", "_sysctl", "query_module", "get_kernel_syms", "create_module", 
+	"init_module", "delete_module", "iopl", "ioperm", "acct", "reboot", "swapon", "swapoff", 
+	"mount", "umount2", "sync", "syncfs", "vhangup", "modify_ldt", "pivot_root", "nfsservctl", 
+	"quotactl", "membarrier", "rseq", "bpf", "getrandom", "ptrace", "getcpu","ioctl", 
+	"finit_module", "personality", "setgroups", "uname",
+
+	// Time
+	"time", "gettimeofday", "settimeofday", "clock_settime", "clock_gettime", "clock_getres", 
+	"clock_nanosleep", "timer_create", "timer_settime", "timer_gettime", "timer_getoverrun", 
+	"timer_delete", "timerfd_create", "timerfd_settime", "timerfd_gettime", "clock_adjtime", 
+	"adjtimex", "utime", "utimes", "utimensat", "futimesat", "nanosleep", "alarm", "getitimer", 
+	"setitimer", "eventfd2", "eventfd", "times",
+
+	// Processes
+	"getpid", "getppid", "gettid", "getpgid", "setpgid", "getpgrp", "setsid", "getsid", "fork", 
+	"vfork", "clone", "clone3", "execve", "getegid","execveat", "exit", "exit_group", "wait4", 
+	"waitid", "getpriority", "setpriority", "getrlimit", "setrlimit", "prlimit64", "getrusage", 
+	"sched_setparam", "sched_getparam", "sched_setscheduler", "sched_getscheduler", "sched_get_priority_max", 
+	"sched_get_priority_min", "sched_rr_get_interval", "sched_setaffinity", "sched_getaffinity", 
+	"sched_yield", "sched_setattr", "sched_getattr", "set_tid_address", "restart_syscall", "kill", 
+	"pidfd_send_signal", "pidfd_open", "pidfd_getfd", "process_madvise", "process_mrelease", "kcmp", 
+	"get_thread_area","getresgid", "setresuid", "unshare", "setregid", "getresuid", "setns", "geteuid", 
+	"setreuid", "getgroups", "uselib", "setresgid", "setuid","set_thread_area", "getuid", "setgid", "getgid",
+
+	// Synchronization
+	"futex", "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "rt_sigpending", "rt_sigtimedwait",
+	"rt_sigqueueinfo", "rt_sigsuspend", "rt_tgsigqueueinfo", "sigaltstack", "pause", "tkill", "tgkill", 
+	"signalfd", "signalfd4", "semget", "semop", "mq_getsetattr","semctl", "semtimedop", "msgget", 
+	"msgsnd", "msgrcv", "msgctl", "shmget", "shmat", "shmctl", "shmdt", "mq_timedreceive","set_robust_list", 
+	"get_robust_list", "futex_wake", "futex_waitv", "futex_wait", "futex_requeue", "mq_timedsend", "mq_open",
+	"mq_notify", "mq_unlink", 
+
+	// Memory
+	"mmap", "mprotect", "munmap", "mremap", "msync", "mincore", "madvise", "brk", "mlock",
+	"munlock", "mlockall", "munlockall", "mlock2", "remap_file_pages","memfd_create", "memfd_secret", 
+	"set_mempolicy_home_node", "pkey_mprotect", "pkey_alloc", "pkey_free", "cachestat", "map_shadow_stack",
+	"migrate_pages", "get_mempolicy", "set_mempolicy", "mbind",
+
+	// Metadata
+	"stat", "fstat", "lstat", "newfstatat", "statx", "getdents", "getdents64", "getcwd", "chdir", 
+	"fchdir", "rename", "renameat", "renameat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", 
+	"symlink", "symlinkat", "readlink", "readlinkat", "chmod", "fchmod", "fchmodat", "chown", "fchown", 
+	"lchown", "fchownat", "umask", "truncate", "ftruncate", "fallocate", "sync_file_range", "vmsplice", 
+	"inotify_init1","move_pages", "faccessat", "openat", "move_mount", "fsopen", "fsconfig", "fsmount", 
+	"fspick", "inotify_init", "lookup_dcookie","name_to_handle_at", "open_by_handle_at", "statfs", 
+	"fstatfs", "ustat", "getxattr", "lgetxattr", "fgetxattr", "listxattr", "llistxattr", "flistxattr", 
+	"setxattr", "lsetxattr", "fsetxattr", "removexattr", "lremovexattr", "fremovexattr", "inotify_rm_watch",
+	"userfaultfd", "io_pgetevents", "open_tree", "quotactl_fd", "ioprio_set", "inotify_add_watch", "ioprio_get",
+
+	// Data
+	"read", "write", "pread64", "pwrite64", "readv", "writev", "preadv", "pwritev", "preadv2", "pwritev2",
+	"creat", "fsync","splice", "tee", "process_vm_readv", "process_vm_writev", "fchmodat2", "openat2", 
+	"faccessat2", "close_range", "copy_file_range", "mount_setattr","fcntl", "chroot", "pipe2", "flock", 
+	"open", "linkat", "pipe", "access", "mknod", "mknodat", "fadvise64", "readahead", "dup3", "dup", "dup2",
+	"fdatasync", "lseek", "link", "close",
+
+	// Network (Excluding connect syscall)
+	"socket", "socketpair", "bind", "listen", "accept", "accept4", "getsockname", "getpeername", 
+	"sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown", "setsockopt", "getsockopt", "sendmmsg", 
+	"recvmmsg", "fanotify_init", "fanotify_mark", "perf_event_open", "kexec_load", "kexec_file_load", 
+	"socketcall", "sendfile", "sethostname", "setdomainname",
+
+	// Security
+	"capget", "capset", "prctl", "arch_prctl", "seccomp", "landlock_create_ruleset", "landlock_add_rule", 
+	"keyctl","landlock_restrict_self", "setfsgid", "request_key", "add_key", "setfsuid",
+
+	// Nonblocking IO
+	"poll", "ppoll", "select", "pselect6", "epoll_create", "epoll_create1", "epoll_ctl", "epoll_ctl_old",
+	"epoll_wait", "epoll_wait_old", "epoll_pwait", "epoll_pwait2", "io_setup", "io_destroy", "io_getevents", 
+	"io_submit", "io_cancel", "io_uring_setup", "io_uring_enter", "io_uring_register",
+
+	// unimplemented system calls
+	//"afs_syscall", "break", "fattach", "fdetach", "ftime", "getmsg", "getpmsg", "gtty", "isastream", "lock", "madvise1", 
+	//"mpx", "prof", "profil", "putmsg", "putpmsg", "security", "stty", "tuxcall", "ulimit", "vserver",
+}
 
 // Sets up the CLI command structure
 func setupCLI() *cobra.Command {
@@ -262,6 +301,8 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			return 0, err
 		}
 	}
+
+	logger.Info().Msgf("Syscall whitelist applied successfully.")
 
 	// Notify on handled syscalls
 	handledSyscalls := map[string]SyscallHandler{
@@ -457,7 +498,7 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 				if err == unix.EINPROGRESS {
 					logger.Info().Msgf("Connection is in progress, waiting for completion")
 				} else {
-					logger.Fatal().Msgf("Error connecting to tor", err)
+					logger.Fatal().Msgf("Error connecting to tor: %v", err)
 				}
 			}
 			
@@ -477,7 +518,7 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 			}
 			
 			if err != nil {
-				logger.Fatal().Msgf("Error connecting to %s proxy", redirect, err)
+				logger.Fatal().Msgf("Error connecting to %s proxy: %v", redirect, err)
 			}
 		}
 
