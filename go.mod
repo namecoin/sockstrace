@@ -1,6 +1,6 @@
 module main.go
 
-go 1.22
+go 1.19
 
 // Fix a bug in issue config
 replace gopkg.in/alecthomas/kingpin.v2 => github.com/alecthomas/kingpin/v2 v2.4.0
