@@ -41,6 +41,7 @@ var (
 	oneCircuit        bool
 	whitelistLoopback bool
 	allowNonTCP		  bool
+	blockIncomingTCP  bool
 )
 
 var (
@@ -225,7 +226,7 @@ Note:
 	rootCmd.Flags().BoolVar(&oneCircuit, "one-circuit", false, "Disable random SOCKS behavior (default: false) If a user provides a username or password, those credentials will be used for all connections.")
 	rootCmd.Flags().BoolVar(&whitelistLoopback, "whitelist-loopback", false, "Allow loopback connections (default: false)")
 	rootCmd.Flags().BoolVar(&allowNonTCP, "allow-non-tcp", true, "Allow non-TCP connections (Tor Proxy only supports TCP)")
-
+	rootCmd.Flags().BoolVar(&blockIncomingTCP, "block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
 
 	return rootCmd
 }
@@ -291,12 +292,26 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 		return 0, err
 	}
 
+	// Define a set of syscalls that we want to block when blockIncomingTCP is true.
+	incomingTCPSyscalls := map[string]bool{
+		"bind":    true,
+		"listen":  true,
+		"accept":  true,
+		"accept4": true,
+	}
+
 	// Allow on whitelist syscalls
 	for sc := range whitelist {
 		syscallID, err := libseccomp.GetSyscallFromName(whitelist[sc])
 		if err != nil {
 			return 0, err
 		}
+
+		// Skip syscalls related to incoming TCP if blockIncomingTCP is true (default is EPERM)
+		if blockIncomingTCP && incomingTCPSyscalls[whitelist[sc]] {
+			continue
+		}
+
 		if err := filter.AddRule(syscallID, libseccomp.ActAllow); err != nil {
 			return 0, err
 		}
