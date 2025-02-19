@@ -183,7 +183,7 @@ Usage:
 Examples:
   sockstrace wget
   sockstrace wget --args example.com
-  sockstrace curl --args "-X POST -d 'data=test' https://example.com"
+  sockstrace wget --args "--directory-prefix=/home/r/Desktop" --args="google.com" (Each argument must be passed separately)
   sockstrace wget --args example.com --logleaks true  (Allow Proxy Leaks and log them)
 
 Note:
