@@ -42,6 +42,8 @@ var (
 	whitelistLoopback bool
 	allowNonTCP		  bool
 	blockIncomingTCP  bool
+	allowedAddresses  []string
+	enforceSocks5Auth bool
 )
 
 var (
@@ -58,6 +60,18 @@ var authData []struct {
 	username string
 	password string
 }
+
+// SOCKS5State tracks handshake and authentication per FD
+type SOCKS5State struct {
+	buffer       bytes.Buffer
+	authCompleted bool // True after full authentication (replaces handshake flag)
+	handshakeCompleted bool
+	username     string
+	password     string
+}
+
+// Tracks SOCKS5 state per FD
+var socks5States = make(map[int]*SOCKS5State)
 
 // FullAddress is the network address and port
 type FullAddress struct {
@@ -85,6 +99,7 @@ type HTTPDialer struct {
 }
 
 var logger zerolog.Logger
+var allowedAddressesMap map[string]struct{}
 
 // The whitelist is obtained from:
 // https://en.wikibooks.org/wiki/The_Linux_Kernel/Syscalls
@@ -207,6 +222,8 @@ Note:
 			proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
 			proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
 
+			loadAllowedAddresses(allowedAddresses)
+
 			initializeAuthData()
 
 			runProgram(args[0]) // Handle program execution after flags are processed
@@ -227,6 +244,8 @@ Note:
 	rootCmd.Flags().BoolVar(&whitelistLoopback, "whitelist-loopback", false, "Allow loopback connections (default: false)")
 	rootCmd.Flags().BoolVar(&allowNonTCP, "allow-non-tcp", true, "Allow non-TCP connections (Tor Proxy only supports TCP)")
 	rootCmd.Flags().BoolVar(&blockIncomingTCP, "block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
+	rootCmd.Flags().StringSliceVar(&allowedAddresses, "allowed-addresses", []string{}, "List of allowed addresses (--allowed-addrs 127.0.0.1:9150,192.168.1.100:1080)")
+	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
 
 	return rootCmd
 }
@@ -245,7 +264,7 @@ func initSeccomp() chan <-struct{} {
 	}
 	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
 
-	handlers := map[string]SyscallHandler{"connect": HandleConnect}
+	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto}
 
 	stop, errChan := Handle(fd, handlers)
 	go func() {
@@ -300,11 +319,22 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 		"accept4": true,
 	}
 
+	// Define a set of syscalls that we want to handle.
+	handledSyscalls := map[string]SyscallHandler{
+		"connect": HandleConnect,
+	}
+
 	// Allow on whitelist syscalls
 	for sc := range whitelist {
 		syscallID, err := libseccomp.GetSyscallFromName(whitelist[sc])
 		if err != nil {
 			return 0, err
+		}
+
+		if enforceSocks5Auth && whitelist[sc] == "sendto"{
+			handledSyscalls["sendto"] = HandleSendto
+
+			continue
 		}
 
 		// Skip syscalls related to incoming TCP if blockIncomingTCP is true (default is EPERM)
@@ -320,9 +350,6 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 	logger.Info().Msgf("Syscall whitelist applied successfully.")
 
 	// Notify on handled syscalls
-	handledSyscalls := map[string]SyscallHandler{
-		"connect": HandleConnect,
-	}
 	for sc := range handledSyscalls {
 		syscallID, err := libseccomp.GetSyscallFromName(sc)
 		if err != nil {
@@ -446,8 +473,116 @@ func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 	return handleIPEvent(sockfd, pid, addr)
 }
 
+func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	logger.Info().Msgf("Intercepted 'sento' syscall from PID %d", req.Pid)
+
+	fd := int(req.Data.Args[0])
+	state, exists := socks5States[fd]
+	if !exists || state.authCompleted {
+		// Skip processing if FD is irrelevant or authentication is done
+		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	}
+
+	fmt.Println("Processing FD", fd)
+
+	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+	mem, err := os.Open(memFile)
+	if err != nil {
+		logger.Fatal().Msgf("failed to open memory file: %v", err)
+	}
+	defer mem.Close()
+
+	// Read the data from the memory at the buffer pointer
+	bufferSize := req.Data.Args[2] // Length of data
+	bufferAddr := req.Data.Args[1] // Pointer to data
+
+	
+	data := make([]byte, bufferSize)
+	_, err = syscall.Pread(int(mem.Fd()), data, int64(bufferAddr))
+	if err != nil {
+		logger.Fatal().Msgf("failed to read memory: %v", err)
+	}
+
+	fmt.Println(data)
+
+	err = parseSOCKS5Data(fd, data)
+	if err != nil {
+		logger.Fatal().Msgf("failed to parse SOCKS5 handshake data %v", err)
+	}
+
+	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+}
+
+func parseSOCKS5Data(fd int, data []byte) error {
+	state, exists := socks5States[fd]
+	if !exists {
+		return fmt.Errorf("unknown FD %d", fd)
+	}
+
+	state.buffer.Write(data) // Append new data to buffer
+	buf := state.buffer.Bytes()
+	
+	// Process SOCKS5 handshake (first three bytes: 0x05, 0x01, 0x02)
+	if !state.handshakeCompleted {
+		// Ensure at least 3 bytes before checking handshake
+		if len(buf) < 3 {
+			return nil // Wait for more data
+		}
+
+		if buf[0] != 0x05 {
+			return fmt.Errorf("invalid SOCKS5 version: %x", buf[0])
+		}
+		if buf[1] != 0x01 {
+			return fmt.Errorf("invalid NMETHODS: expected 0x01, got 0x%x", buf[1])
+		}
+		if buf[2] != 0x02 {
+			return fmt.Errorf("invalid METHODS: expected 0x02, got 0x%x", buf[2])
+		}
+
+		state.buffer.Next(3) // Remove processed handshake bytes
+		state.handshakeCompleted = true
+		fmt.Println("SOCKS5 handshake completed.")
+	}
+
+	// Process authentication if `enforceSocks5Auth` is enabled
+	if state.handshakeCompleted && !state.authCompleted { // In case we'll check for post-handshake data, later down the line
+		buf = state.buffer.Bytes()
+		if len(buf) < 2 {
+			return nil // Wait for more data
+		}
+
+		if buf[0] != 0x01 {
+			return fmt.Errorf("invalid auth version: %x", buf[0])
+		}
+
+		usernameLen := int(buf[1])
+		if len(buf) < 2+usernameLen+1 {
+			return nil // Wait for more data
+		}
+
+		state.username = string(buf[2 : 2+usernameLen])
+		passwordLen := int(buf[2+usernameLen])
+		if len(buf) < 2+usernameLen+1+passwordLen {
+			return nil // Wait for more data
+		}
+
+		state.password = string(buf[3+usernameLen : 3+usernameLen+passwordLen])
+		state.authCompleted = true // Mark as completed
+
+		state.buffer.Next(3 + usernameLen + passwordLen) // Remove processed auth data
+		fmt.Printf("Valid SOCKS5 auth: username=%s, password=%s\n", state.username, state.password)
+	}
+
+	// Optional: Check for post-handshake data
+	if state.authCompleted && state.buffer.Len() > 0 {
+		fmt.Println("Post-handshake data detected: SOCKS5 handshake fully completed.")
+	}
+
+	return nil
+}
+
 func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
-	if IsAddressAllowed(address){
+	if IsAddressAllowed(address, fd){
 		logger.Info().Msgf("Allowed connection to %s", address.String())
 		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 	} else if logLeaks {
@@ -542,8 +677,16 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 	}
 }
 
-func IsIPAddressAllowed(address FullAddress) bool {
+func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
 	if socksTCPv4 == address.String() || socksTCPv6 == address.String() {
+		if enforceSocks5Auth {
+			socks5States[int(fd)] = &SOCKS5State{authCompleted: false}
+		}
+
+		return true
+	}
+
+	if isWhitelistedAddress(address.String()) {
 		return true
 	}
 
@@ -554,14 +697,14 @@ func IsIPAddressAllowed(address FullAddress) bool {
 	return false
 }
 
-func IsAddressAllowed(address FullAddress) bool {
+func IsAddressAllowed(address FullAddress, fd uint64) bool {
 	switch address.Family {
 	case unix.AF_UNIX:
 		return true
 	case unix.AF_INET:
-		return IsIPAddressAllowed(address)
+		return IsIPAddressAllowed(address, fd)
 	case unix.AF_INET6:
-		return IsIPAddressAllowed(address)
+		return IsIPAddressAllowed(address, fd)
 	default:
 		return false
 	}
@@ -898,4 +1041,16 @@ func initializeAuthData() {
 			password string
 		}{username, password})
 	}
+}
+
+func loadAllowedAddresses(addresses []string) {
+	allowedAddressesMap = make(map[string]struct{}, len(addresses))
+	for _, addr := range addresses {
+		allowedAddressesMap[addr] = struct{}{} // Empty struct uses zero memory
+	}
+}
+
+func isWhitelistedAddress(addr string) bool {
+	_, allowed := allowedAddressesMap[addr]
+	return allowed
 }
