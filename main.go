@@ -64,7 +64,7 @@ var authData []struct {
 // SOCKS5State tracks handshake and authentication per FD
 type SOCKS5State struct {
 	buffer       bytes.Buffer
-	authCompleted bool // True after full authentication (replaces handshake flag)
+	authCompleted bool
 	handshakeCompleted bool
 	username     string
 	password     string
@@ -483,8 +483,6 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 	}
 
-	fmt.Println("Processing FD", fd)
-
 	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
 	mem, err := os.Open(memFile)
 	if err != nil {
@@ -502,8 +500,6 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	if err != nil {
 		logger.Fatal().Msgf("failed to read memory: %v", err)
 	}
-
-	fmt.Println(data)
 
 	err = parseSOCKS5Data(fd, data)
 	if err != nil {
@@ -541,7 +537,6 @@ func parseSOCKS5Data(fd int, data []byte) error {
 
 		state.buffer.Next(3) // Remove processed handshake bytes
 		state.handshakeCompleted = true
-		fmt.Println("SOCKS5 handshake completed.")
 	}
 
 	// Process authentication if `enforceSocks5Auth` is enabled
@@ -570,12 +565,7 @@ func parseSOCKS5Data(fd int, data []byte) error {
 		state.authCompleted = true // Mark as completed
 
 		state.buffer.Next(3 + usernameLen + passwordLen) // Remove processed auth data
-		fmt.Printf("Valid SOCKS5 auth: username=%s, password=%s\n", state.username, state.password)
-	}
-
-	// Optional: Check for post-handshake data
-	if state.authCompleted && state.buffer.Len() > 0 {
-		fmt.Println("Post-handshake data detected: SOCKS5 handshake fully completed.")
+		logger.Info().Msgf("SOCKS5 authentication completed for FD %d: %s:%s", fd, state.username, state.password)
 	}
 
 	return nil
