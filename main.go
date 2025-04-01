@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,6 +25,13 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 )
+
+// Global variable to store tracee details
+var tracee struct {
+	Name string
+	Args []string
+	PID  int
+}
 
 // SyscallHandler defines the handler function for a syscall notification.
 type SyscallHandler func(fd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32)
@@ -44,6 +52,7 @@ var (
 	blockIncomingTCP  bool
 	allowedAddresses  []string
 	enforceSocks5Auth bool
+	killAllTracees    bool
 )
 
 var (
@@ -246,6 +255,7 @@ Note:
 	rootCmd.Flags().BoolVar(&blockIncomingTCP, "block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
 	rootCmd.Flags().StringSliceVar(&allowedAddresses, "allowed-addresses", []string{}, "List of allowed addresses (--allowed-addrs 127.0.0.1:9150,192.168.1.100:1080)")
 	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
+	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
 
 	return rootCmd
 }
@@ -299,7 +309,18 @@ func runProgram(program string) {
 	cmd := exec.Command(program, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
-	if err := cmd.Run(); err != nil {
+	// Start the process
+	if err := cmd.Start(); err != nil {
+		logger.Fatal().Msgf("Error starting program: %v", err)
+	}
+
+	tracee.Name = program
+	tracee.Args = args
+	tracee.PID = cmd.Process.Pid
+
+	logger.Info().Msgf("Tracee PID: %d", tracee.PID)
+
+	if err := cmd.Wait(); err != nil {
 		logger.Fatal().Msgf("Error executing program: %v", err)
 	}
 }
@@ -509,68 +530,6 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 }
 
-func parseSOCKS5Data(fd int, data []byte) error {
-	state, exists := socks5States[fd]
-	if !exists {
-		return fmt.Errorf("unknown FD %d", fd)
-	}
-
-	state.buffer.Write(data) // Append new data to buffer
-	buf := state.buffer.Bytes()
-	
-	// Process SOCKS5 handshake (first three bytes: 0x05, 0x01, 0x02)
-	if !state.handshakeCompleted {
-		// Ensure at least 3 bytes before checking handshake
-		if len(buf) < 3 {
-			return nil // Wait for more data
-		}
-
-		if buf[0] != 0x05 {
-			return fmt.Errorf("invalid SOCKS5 version: %x", buf[0])
-		}
-		if buf[1] != 0x01 {
-			return fmt.Errorf("invalid NMETHODS: expected 0x01, got 0x%x", buf[1])
-		}
-		if buf[2] != 0x02 {
-			return fmt.Errorf("invalid METHODS: expected 0x02, got 0x%x", buf[2])
-		}
-
-		state.buffer.Next(3) // Remove processed handshake bytes
-		state.handshakeCompleted = true
-	}
-
-	// Process authentication if `enforceSocks5Auth` is enabled
-	if state.handshakeCompleted && !state.authCompleted { // In case we'll check for post-handshake data, later down the line
-		buf = state.buffer.Bytes()
-		if len(buf) < 2 {
-			return nil // Wait for more data
-		}
-
-		if buf[0] != 0x01 {
-			return fmt.Errorf("invalid auth version: %x", buf[0])
-		}
-
-		usernameLen := int(buf[1])
-		if len(buf) < 2+usernameLen+1 {
-			return nil // Wait for more data
-		}
-
-		state.username = string(buf[2 : 2+usernameLen])
-		passwordLen := int(buf[2+usernameLen])
-		if len(buf) < 2+usernameLen+1+passwordLen {
-			return nil // Wait for more data
-		}
-
-		state.password = string(buf[3+usernameLen : 3+usernameLen+passwordLen])
-		state.authCompleted = true // Mark as completed
-
-		state.buffer.Next(3 + usernameLen + passwordLen) // Remove processed auth data
-		logger.Info().Msgf("SOCKS5 authentication completed for FD %d: %s:%s", fd, state.username, state.password)
-	}
-
-	return nil
-}
-
 func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
 	if IsAddressAllowed(address, fd){
 		logger.Info().Msgf("Allowed connection to %s", address.String())
@@ -585,10 +544,12 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 		}
 
 		if killProg {
-			err = killProcessByID(tgid)
+			err = killProcessAndDescendants(tracee.PID)
 			if err != nil {
 				logger.Fatal().Msgf("Error killing process: %v", err)
 			}
+
+			os.Exit(0)
 		}
 
 		tgidFD, err := pidfd.Open(tgid, 0)
@@ -859,18 +820,6 @@ func ParseAddress(socketaddr []byte) (FullAddress, error) { //nolint
 	}
 }
 
-// killProcessByID sends a SIGKILL signal to a process with the specified PID or TGID.
-func killProcessByID(pid int) error {
-	// Send SIGKILL to the main process (TGID)
-	err := syscall.Kill(pid, syscall.SIGKILL)
-	if err != nil {
-		return fmt.Errorf("failed to kill process with ID %d: %v", pid, err)
-	}
-
-	logger.Warn().Msgf("Successfully killed process with ID %d\n", pid)
-	return nil
-}
-
 func getTgid(pid uint32) (int, error) {
 	file, err := os.Open(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
@@ -979,6 +928,68 @@ func (h *HTTPDialer) Dial(_, addr string, httpconn net.Conn) (net.Conn, error) {
 	return conn, nil
 }
 
+func parseSOCKS5Data(fd int, data []byte) error {
+	state, exists := socks5States[fd]
+	if !exists {
+		return fmt.Errorf("unknown FD %d", fd)
+	}
+
+	state.buffer.Write(data) // Append new data to buffer
+	buf := state.buffer.Bytes()
+	
+	// Process SOCKS5 handshake (first three bytes: 0x05, 0x01, 0x02)
+	if !state.handshakeCompleted {
+		// Ensure at least 3 bytes before checking handshake
+		if len(buf) < 3 {
+			return nil // Wait for more data
+		}
+
+		if buf[0] != 0x05 {
+			return fmt.Errorf("invalid SOCKS5 version: %x", buf[0])
+		}
+		if buf[1] != 0x01 {
+			return fmt.Errorf("invalid NMETHODS: expected 0x01, got 0x%x", buf[1])
+		}
+		if buf[2] != 0x02 {
+			return fmt.Errorf("invalid METHODS: expected 0x02, got 0x%x", buf[2])
+		}
+
+		state.buffer.Next(3) // Remove processed handshake bytes
+		state.handshakeCompleted = true
+	}
+
+	// Process authentication if `enforceSocks5Auth` is enabled
+	if state.handshakeCompleted && !state.authCompleted { // In case we'll check for post-handshake data, later down the line
+		buf = state.buffer.Bytes()
+		if len(buf) < 2 {
+			return nil // Wait for more data
+		}
+
+		if buf[0] != 0x01 {
+			return fmt.Errorf("invalid auth version: %x", buf[0])
+		}
+
+		usernameLen := int(buf[1])
+		if len(buf) < 2+usernameLen+1 {
+			return nil // Wait for more data
+		}
+
+		state.username = string(buf[2 : 2+usernameLen])
+		passwordLen := int(buf[2+usernameLen])
+		if len(buf) < 2+usernameLen+1+passwordLen {
+			return nil // Wait for more data
+		}
+
+		state.password = string(buf[3+usernameLen : 3+usernameLen+passwordLen])
+		state.authCompleted = true // Mark as completed
+
+		state.buffer.Next(3 + usernameLen + passwordLen) // Remove processed auth data
+		logger.Info().Msgf("SOCKS5 authentication completed for FD %d: %s:%s", fd, state.username, state.password)
+	}
+
+	return nil
+}
+
 func resolveCredentials() (string, string, error) {
 	username, password := proxyUser, proxyPass
 	if username == "" && password == "" {
@@ -1043,4 +1054,149 @@ func loadAllowedAddresses(addresses []string) {
 func isWhitelistedAddress(addr string) bool {
 	_, allowed := allowedAddressesMap[addr]
 	return allowed
+}
+
+func killProcessAndDescendants(pid int) error {
+	if killAllTracees { 
+		descendants, err := getDescendants(pid)
+		if err != nil {
+			return fmt.Errorf("error getting descendants: %w", err)
+		}
+
+		// Sort in reverse order to kill children before parents
+		sort.Sort(sort.Reverse(sort.IntSlice(descendants)))
+
+		// Kill each process
+		for _, p := range descendants {
+			if p != pid { // Avoid killing the initial PID prematurely
+				err = killProcessByID(p)
+				// Check if the process is already terminated
+				if err != nil {
+					if err == unix.ESRCH {
+						logger.Info().Msgf("Process %d already terminated\n", p)
+						continue
+					}
+
+					return fmt.Errorf("error killing descendant process %d: %w", p, err)
+				}
+			}
+		}
+	}
+	
+
+	// Kill the main PID last (for KillAllTracees)
+	err := killProcessByID(pid)
+	if err != nil {
+		// Check if the process is already terminated (For killAllTracees)
+		if err == unix.ESRCH && killAllTracees{
+			logger.Info().Msgf("Process %d already terminated\n", pid)
+			return nil
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+// getThreads returns all TIDs (threads) of a given PID from /proc/[pid]/task/
+func getThreads(pid int) ([]int, error) {
+	path := fmt.Sprintf("/proc/%d/task", pid)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("could not read task directory for PID %d: %w", pid, err)
+	}
+
+	var tids []int
+	for _, entry := range entries {
+		if tid, err := strconv.Atoi(entry.Name()); err == nil {
+			tids = append(tids, tid)
+		}
+	}
+
+	return tids, nil
+}
+
+// getChildren reads `/proc/[pid]/task/[tid]/children` for a given PID and thread ID
+func getChildren(pid int, tid int) ([]int, error) {
+	path := fmt.Sprintf("/proc/%d/task/%d/children", pid, tid)
+	fd, err := os.Open(path)
+	if err != nil {
+		// It's possible that a thread doesn't have a children file
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not open children file for PID %d, TID %d: %w", pid, tid, err)
+	}
+	defer fd.Close()
+
+	buf := make([]byte, 4096)
+	n, err := fd.Read(buf)
+	if err != nil {
+		if err.Error() == "EOF" || n == 0 {
+			
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not read children file for PID %d, TID %d: %w", pid, tid, err)
+	}
+
+	var children []int
+	for _, p := range strings.Fields(string(buf[:n])) {
+		if childPid, err := strconv.Atoi(p); err == nil {
+			children = append(children, childPid)
+		}
+	}
+
+	return children, nil
+}
+
+// getDescendants recursively finds all children of a given PID
+// It's important to check TIDs because a process may have multiple threads (TIDs), 
+// and child processes can be associated with any of these threads, not just the main thread (PID). 
+// If we only check the main PID's children, we might miss processes created by other threads.
+func getDescendants(pid int) ([]int, error) {
+	seen := make(map[int]struct{})
+	var descendants []int
+
+	stack := []int{pid} // Stack for DFS-like traversal
+
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if _, exists := seen[current]; exists {
+			continue
+		}
+		seen[current] = struct{}{}
+		descendants = append(descendants, current)
+
+		tids, err := getThreads(current)
+		if err != nil {
+			fmt.Printf("Error fetching threads for PID %d: %v\n", current, err)
+			continue
+		}
+
+		for _, tid := range tids {
+			children, err := getChildren(current, tid) // Pass the current PID
+			if err != nil {
+				fmt.Printf("Error fetching children for PID %d, TID %d: %v\n", current, tid, err)
+				continue
+			}
+			stack = append(stack, children...)
+		}
+	}
+
+	return descendants, nil
+}
+
+// killProcessByID sends a SIGKILL signal to a process with the specified PID or TGID.
+func killProcessByID(pid int) error {
+	// Send SIGKILL to the main process (TGID)
+	err := syscall.Kill(pid, syscall.SIGKILL)
+	if err != nil {
+		return err
+	}
+
+	logger.Warn().Msgf("Successfully killed process with ID %d\n", pid)
+	return nil
 }
