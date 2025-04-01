@@ -548,6 +548,8 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 			if err != nil {
 				logger.Fatal().Msgf("Error killing process: %v", err)
 			}
+
+			os.Exit(0)
 		}
 
 		tgidFD, err := pidfd.Open(tgid, 0)
