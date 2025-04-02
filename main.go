@@ -983,6 +983,11 @@ func parseSOCKS5Data(fd int, data []byte) error {
 		state.password = string(buf[3+usernameLen : 3+usernameLen+passwordLen])
 		state.authCompleted = true // Mark as completed
 
+		// Validate the extracted username and password
+		if err := validateSOCKS5Auth(state.username, state.password); err != nil {
+			return err
+		}
+
 		state.buffer.Next(3 + usernameLen + passwordLen) // Remove processed auth data
 		logger.Info().Msgf("SOCKS5 authentication completed for FD %d: %s:%s", fd, state.username, state.password)
 	}
@@ -1198,5 +1203,17 @@ func killProcessByID(pid int) error {
 	}
 
 	logger.Warn().Msgf("Successfully killed process with ID %d\n", pid)
+	return nil
+}
+
+// validateSOCKS5Auth checks if the username and password meet the requirements. (e.g Tor spec or a given regex)
+func validateSOCKS5Auth(username, password string) error {
+	if len(username) == 0 || len(password) == 0 {
+		return fmt.Errorf("missing SOCKS5 authentication credentials (username: '%s', password: '%s')", username, password)
+	}
+
+	// TODO: Implement Tor-specific authentication rules here
+	// Example: If Tor has a specific username/password format requirement, check it
+
 	return nil
 }
