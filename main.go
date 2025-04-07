@@ -1222,6 +1222,8 @@ func validateSOCKS5Auth(username, password string) error {
 		return fmt.Errorf("missing SOCKS5 authentication credentials (username: '%s', password: '%s')", username, password)
 	}
 
+	// Tor SOCKS5 authentication format is validated according to the specification:
+	// https://spec.torproject.org/socks-extensions.html
 	if enforceSocks5TorAuth {
 		const torPrefix = "<torS0X>"
 
