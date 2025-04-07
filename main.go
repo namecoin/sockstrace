@@ -52,6 +52,7 @@ var (
 	blockIncomingTCP  bool
 	allowedAddresses  []string
 	enforceSocks5Auth bool
+	enforceSocks5TorAuth bool
 	killAllTracees    bool
 )
 
@@ -231,6 +232,10 @@ Note:
 			proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
 			proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
 
+			if enforceSocks5TorAuth {
+				enforceSocks5Auth = true
+			}
+
 			loadAllowedAddresses(allowedAddresses)
 
 			initializeAuthData()
@@ -255,6 +260,7 @@ Note:
 	rootCmd.Flags().BoolVar(&blockIncomingTCP, "block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
 	rootCmd.Flags().StringSliceVar(&allowedAddresses, "allowed-addresses", []string{}, "List of allowed addresses (--allowed-addrs 127.0.0.1:9150,192.168.1.100:1080)")
 	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
+	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
 
 	return rootCmd
@@ -985,7 +991,11 @@ func parseSOCKS5Data(fd int, data []byte) error {
 
 		// Validate the extracted username and password
 		if err := validateSOCKS5Auth(state.username, state.password); err != nil {
-			return err
+			if logLeaks {
+				logger.Warn().Msgf("SOCKS5 authentication failed for FD %d: %s", fd, err)
+			} else {
+				return err
+			}
 		}
 
 		state.buffer.Next(3 + usernameLen + passwordLen) // Remove processed auth data
@@ -1212,8 +1222,34 @@ func validateSOCKS5Auth(username, password string) error {
 		return fmt.Errorf("missing SOCKS5 authentication credentials (username: '%s', password: '%s')", username, password)
 	}
 
-	// TODO: Implement Tor-specific authentication rules here
-	// Example: If Tor has a specific username/password format requirement, check it
+	if enforceSocks5TorAuth {
+		const torPrefix = "<torS0X>"
+
+		if !strings.HasPrefix(username, torPrefix) {
+			return fmt.Errorf("legacy SOCKS5 authentication detected: username='%s', password='%s'", username, password)
+		}
+
+		if len(username) <= len(torPrefix) {
+			return fmt.Errorf("invalid SOCKS5 authentication: username '%s' too short, missing format type", username)
+		}
+
+		formatType := username[len(torPrefix)] // First character after <torS0X>
+		usernameRest := username[len(torPrefix)+1:]
+
+		switch formatType {
+			case '0': // Format type [30]
+				if len(usernameRest) > 0 {
+					return fmt.Errorf("invalid SOCKS5 authentication: format type '0' must have an empty username field")
+				}
+			case '1': // Format type [31]
+				if len(usernameRest) == 0 {
+					return fmt.Errorf("invalid SOCKS5 authentication: format type '1' requires a non-empty RPC Object ID")
+				}
+			default:
+				return fmt.Errorf("invalid SOCKS5 authentication: unrecognized format type '%c'", formatType)
+			}
+
+	}
 
 	return nil
 }
