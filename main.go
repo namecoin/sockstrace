@@ -551,6 +551,8 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 		if err != nil {
 			logger.Fatal().Msgf("Error generating core dump: %v", err)
 		}
+
+		os.Exit(0)
 	} else {
 		tgid, err := getTgid(pid)
 		if err != nil {
@@ -636,10 +638,9 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 				logger.Fatal().Msgf("Error connecting to %s proxy: %v", redirect, err)
 			}
 		}
-
-		// Default action is to block the connection
-		return 0, 0, 0
 	}
+	// Default action is to block the connection
+	return 0, 0, 0
 }
 
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
