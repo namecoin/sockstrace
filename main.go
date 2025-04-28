@@ -111,8 +111,8 @@ type HTTPDialer struct {
 }
 
 var logger zerolog.Logger
-var allowedAddressesMap map[string]struct{}
-var allowedTCPOriginMap map[string]struct{}
+var allowedAddressesMap = make(map[string]struct{})
+var allowedTCPOriginMap = make(map[string]struct{})
 
 // The whitelist is obtained from:
 // https://en.wikibooks.org/wiki/The_Linux_Kernel/Syscalls
