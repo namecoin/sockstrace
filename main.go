@@ -54,6 +54,7 @@ var (
 	enforceSocks5Auth bool
 	enforceSocks5TorAuth bool
 	killAllTracees    bool
+	coreDump          bool
 )
 
 var (
@@ -262,6 +263,7 @@ Note:
 	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
+	rootCmd.Flags().BoolVar(&coreDump, "core-dump", false, "Enable core dump (default: false)")
 
 	return rootCmd
 }
@@ -543,6 +545,14 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 	} else if logLeaks {
 		logger.Warn().Msgf("Proxy Leak detected, but allowed: %s", address.String())
 		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	} else if coreDump {
+		logger.Info().Msgf("Dumping core for PID %d", pid)
+		err := generateCoreDump(int(pid))
+		if err != nil {
+			logger.Fatal().Msgf("Error generating core dump: %v", err)
+		}
+		
+		os.Exit(0)
 	} else {
 		tgid, err := getTgid(pid)
 		if err != nil {
@@ -628,10 +638,9 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 				logger.Fatal().Msgf("Error connecting to %s proxy: %v", redirect, err)
 			}
 		}
-
-		// Default action is to block the connection
-		return 0, 0, 0
 	}
+	// Default action is to block the connection
+	return 0, 0, 0
 }
 
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
@@ -1253,5 +1262,42 @@ func validateSOCKS5Auth(username, password string) error {
 
 	}
 
+	return nil
+}
+
+// generateCoreDump sends SIGABRT to the given PID to trigger a core dump.
+// It does not attempt to move or rename the core dump file.
+func generateCoreDump(pid int) error {
+	// Check if core dumps are allowed
+	if err := checkCoreDumpLimit(); err != nil {
+		return err
+	}
+
+	// Send SIGABRT
+	if err := syscall.Kill(pid, syscall.SIGABRT); err != nil {
+		return fmt.Errorf("failed to send SIGABRT to PID %d: %w", pid, err)
+	}
+	return nil
+}
+
+// checkCoreDumpLimit ensures core dumps are enabled and warns if size is limited.
+func checkCoreDumpLimit() error {
+	var rlimit unix.Rlimit
+
+	if err := unix.Getrlimit(unix.RLIMIT_CORE, &rlimit); err != nil {
+		return fmt.Errorf("failed to get RLIMIT_CORE: %w", err)
+	}
+
+	switch {
+	case rlimit.Cur == 0:
+		return fmt.Errorf("core dumps are disabled (ulimit -c 0); enable with 'ulimit -c unlimited'")
+
+	case rlimit.Cur != unix.RLIM_INFINITY:
+		fmt.Fprintf(os.Stderr,
+			"Warning: core dumps are limited to %d bytes.\n"+
+				"For full dumps, consider setting 'ulimit -c unlimited'\n", rlimit.Cur)
+	}
+
+	// Core dumps are enabled
 	return nil
 }
