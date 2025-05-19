@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/oraoto/go-pidfd"
 	"github.com/robertmin1/socks5/v4"
 	"github.com/rs/zerolog"
@@ -56,6 +57,7 @@ var (
 	enforceSocks5TorAuth bool
 	killAllTracees    bool
 	coreDump          bool
+	proxydns		  bool
 )
 
 var (
@@ -108,6 +110,23 @@ type HTTPDialer struct {
 	Host     string
 	Username string
 	Password string
+}
+
+type msghdr struct {
+	Name       uint64
+	Namelen    uint32
+	_          uint32 // align
+	Iov        uint64
+	Iovlen     uint64
+	Control    uint64
+	Controllen uint64
+	Flags      int32
+	_          uint32 // align
+}
+
+type iovec struct {
+	Base uint64
+	Len  uint64
 }
 
 var logger zerolog.Logger
@@ -268,6 +287,7 @@ Note:
 	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
 	rootCmd.Flags().BoolVar(&coreDump, "core-dump", false, "Enable core dump (default: false)")
+	rootCmd.Flags().BoolVar(&proxydns, "proxydns", false, "Enable DNS proxying (default: false)")
 
 	return rootCmd
 }
@@ -286,7 +306,7 @@ func initSeccomp() chan <-struct{} {
 	}
 	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
 
-	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen}
+	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg, "sendmmsg": HandleSendmsg}
 
 	stop, errChan := Handle(fd, handlers)
 	go func() {
@@ -370,6 +390,12 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 
 		if enforceSocks5Auth && whitelist[sc] == "sendto"{
 			handledSyscalls["sendto"] = HandleSendto
+
+			continue
+		}
+
+		if proxydns && (whitelist[sc] == "sendmsg" || whitelist[sc] == "sendmmsg") {
+			handledSyscalls[whitelist[sc]] = HandleSendmsg
 
 			continue
 		}
@@ -550,6 +576,95 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 }
 
+func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	logger.Info().Msgf("Intercepted 'sendmsg' syscall from PID %d", req.Pid)
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
+
+	tgid, err := getTgid(uint32(req.Pid))
+	if err != nil {
+		logger.Fatal().Msgf("Error getting tgid: %v", err)
+	}
+
+	pfd, err := pidfd.Open(tgid, 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error opening pidfd %v", err)
+	}
+
+	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting fd %v", err)
+	}
+	defer unix.Close(localFd)
+
+	_, port, _, err := getConnectionInfo(localFd, true)
+	if err != nil {
+		if err == syscall.ENOTCONN {
+			// Connection not established yet
+			// Maybe confirm the address is not in the msghdr
+			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+		} else {
+			logger.Fatal().Msgf("Error getting connection info: %v", err)
+		}
+	}
+
+	if port == 53 {
+		// DNS request
+		// Read the memory of the process
+		memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+		mem, err := os.Open(memFile)
+		if err != nil {
+			logger.Fatal().Msgf("failed to open memory file: %v", err)
+		}
+		defer mem.Close()
+		// Read the syscall arguments
+		data := make([]byte, syscall.SizeofMsghdr)
+		_, err = syscall.Pread(int(mem.Fd()), data, int64(req.Data.Args[1]))
+		if err != nil {
+			logger.Fatal().Msgf("failed to read memory: %v", err)
+		}
+
+		var msg msghdr
+		if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &msg); err != nil {
+			logger.Fatal().Msgf("failed to decode msghdr: %v", err)
+		}
+	
+		// Read first iovec
+		iovBytes, err := readBytes(mem, msg.Iov, uint64(binary.Size(iovec{})))
+		if err != nil {
+			logger.Fatal().Msgf("failed to read iovec: %v", err)
+		}
+		var iov iovec
+		if err := binary.Read(bytes.NewReader(iovBytes), binary.LittleEndian, &iov); err != nil {
+			logger.Fatal().Msgf("failed to decode iovec: %v", err)
+		}
+	
+		// Read actual DNS bytes
+		dnsData, err := readBytes(mem, iov.Base, iov.Len)
+		if err != nil {
+			logger.Fatal().Msgf("failed to read DNS data: %v", err)
+		}
+	
+		// Parse DNS message minimally
+		var m dns.Msg
+		if err := m.Unpack(dnsData); err != nil {
+			logger.Fatal().Msgf("failed to unpack DNS message: %v", err)
+		}
+		if len(m.Question) == 0 {
+			logger.Info().Msgf("No DNS question found")
+		} else {
+			for _, question := range m.Question {
+				logger.Info().Msgf("DNS question: %s", question.Name)
+			}
+		}
+	}
+
+	// Default behavior is to allow the connection
+	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+}
+
 func HandleBind(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
 	logger.Info().Msgf("Intercepted 'bind' syscall from PID %d", req.Pid)
 	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
@@ -608,7 +723,7 @@ func HandleListen(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	}
 	defer unix.Close(localFd)
 
-	addr, _, err := getConnectionInfo(localFd, false)
+	addr,_, _, err := getConnectionInfo(localFd, false)
 	if err != nil {
 		logger.Fatal().Msgf("Error getting connection info: %v", err)
 	}
@@ -1387,7 +1502,7 @@ func checkCoreDumpLimit() error {
 
 // getConnectionInfo retrieves the connection information for a given file descriptor (fd).
 // It returns the address, family, and any error encountered.
-func getConnectionInfo(fd int, remote bool) (addr string, fam string, err error) {
+func getConnectionInfo(fd int, remote bool) (addr string, port int, fam string, err error) {
 	var sa syscall.Sockaddr
 	if remote {
 		sa, err = syscall.Getpeername(fd)
@@ -1395,19 +1510,28 @@ func getConnectionInfo(fd int, remote bool) (addr string, fam string, err error)
 		sa, err = syscall.Getsockname(fd)
 	}
 	if err != nil {
-		return "", "", err
+		return "", 0, "", err
 	}
 
 	switch sa := sa.(type) {
 	case *syscall.SockaddrInet4:
 		ip := net.IP(sa.Addr[:]).String()
-		return fmt.Sprintf("%s:%d", ip, sa.Port), "ipv4", nil
+		return fmt.Sprintf("%s:%d", ip, sa.Port), sa.Port, "ipv4", nil
 	case *syscall.SockaddrInet6:
 		ip := net.IP(sa.Addr[:]).String()
-		return fmt.Sprintf("[%s]:%d", ip, sa.Port), "ipv6", nil
+		return fmt.Sprintf("[%s]:%d", ip, sa.Port), sa.Port, "ipv6", nil
 	case *syscall.SockaddrUnix:
-		return sa.Name, "unix", nil
+		return sa.Name, 0, "unix", nil
 	default:
-		return "", "unknown", fmt.Errorf("unsupported sockaddr type: %T", sa)
+		return "", 0, "unknown", fmt.Errorf("unsupported sockaddr type: %T", sa)
 	}
+}
+
+func readBytes(mem *os.File, addr uint64, length uint64) ([]byte, error) {
+	buf := make([]byte, length)
+	_, err := syscall.Pread(int(mem.Fd()), buf, int64(addr))
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
