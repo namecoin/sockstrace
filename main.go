@@ -51,6 +51,7 @@ var (
 	allowNonTCP		  bool
 	blockIncomingTCP  bool
 	allowedAddresses  []string
+	allowedTCPOrigin  []string
 	enforceSocks5Auth bool
 	enforceSocks5TorAuth bool
 	killAllTracees    bool
@@ -110,7 +111,8 @@ type HTTPDialer struct {
 }
 
 var logger zerolog.Logger
-var allowedAddressesMap map[string]struct{}
+var allowedAddressesMap = make(map[string]struct{})
+var allowedTCPOriginMap = make(map[string]struct{})
 
 // The whitelist is obtained from:
 // https://en.wikibooks.org/wiki/The_Linux_Kernel/Syscalls
@@ -237,7 +239,8 @@ Note:
 				enforceSocks5Auth = true
 			}
 
-			loadAllowedAddresses(allowedAddresses)
+			loadAllowedAddresses(allowedAddressesMap,allowedAddresses)
+			loadAllowedAddresses(allowedTCPOriginMap,allowedTCPOrigin)
 
 			initializeAuthData()
 
@@ -260,6 +263,7 @@ Note:
 	rootCmd.Flags().BoolVar(&allowNonTCP, "allow-non-tcp", true, "Allow non-TCP connections (Tor Proxy only supports TCP)")
 	rootCmd.Flags().BoolVar(&blockIncomingTCP, "block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
 	rootCmd.Flags().StringSliceVar(&allowedAddresses, "allowed-addresses", []string{}, "List of allowed addresses (--allowed-addrs 127.0.0.1:9150,192.168.1.100:1080)")
+	rootCmd.Flags().StringSliceVar(&allowedTCPOrigin, "allowed-tcp-origin", []string{}, "List of allowed TCP origin addresses (--allowed-tcp-origin  127.0.0.1:9150,127.0.0.1:1080)")
 	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
@@ -282,7 +286,7 @@ func initSeccomp() chan <-struct{} {
 	}
 	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
 
-	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto}
+	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen}
 
 	stop, errChan := Handle(fd, handlers)
 	go func() {
@@ -344,13 +348,17 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 	incomingTCPSyscalls := map[string]bool{
 		"bind":    true,
 		"listen":  true,
-		"accept":  true,
-		"accept4": true,
 	}
 
 	// Define a set of syscalls that we want to handle.
 	handledSyscalls := map[string]SyscallHandler{
 		"connect": HandleConnect,
+	}
+
+	if len(allowedTCPOrigin) > 0 {
+		handledSyscalls["bind"] = HandleBind
+		handledSyscalls["listen"] = HandleListen
+		blockIncomingTCP = true // Enable blocking incoming TCP connections to skip whitelisting
 	}
 
 	// Allow on whitelist syscalls
@@ -504,6 +512,10 @@ func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 
 func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
 	logger.Info().Msgf("Intercepted 'sento' syscall from PID %d", req.Pid)
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
 
 	fd := int(req.Data.Args[0])
 	state, exists := socks5States[fd]
@@ -536,6 +548,78 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	}
 
 	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+}
+
+func HandleBind(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	logger.Info().Msgf("Intercepted 'bind' syscall from PID %d", req.Pid)
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
+
+	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+	mem, err := os.Open(memFile)
+	if err != nil {
+		logger.Fatal().Msgf("failed to open memory file: %v", err)
+	}
+	defer mem.Close()
+	// Read the syscall arguments
+	data := make([]byte, req.Data.Args[2])
+	_, err = syscall.Pread(int(mem.Fd()), data, int64(req.Data.Args[1]))
+	if err != nil {
+		logger.Fatal().Msgf("failed to read memory: %v", err)
+	}
+	// Parse the address
+	addr, err := ParseAddress(data)
+	if err != nil {
+		logger.Fatal().Msgf("failed to parse address: %v", err)
+	}
+
+	if isWhitelistedAddress(allowedTCPOriginMap, addr.String()) {
+		logger.Info().Msgf("Allowed bind to %s", addr.String())
+		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	} 
+		
+	logger.Warn().Msgf("Blocked bind to %s", addr.String())
+
+	return 0, 0, 0
+}
+
+func HandleListen(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	logger.Info().Msgf("Intercepted 'listen' syscall from PID %d", req.Pid)
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
+
+	tgid, err := getTgid(uint32(req.Pid))
+	if err != nil {
+		logger.Fatal().Msgf("Error getting tgid: %v", err)
+	}
+
+	pfd, err := pidfd.Open(tgid, 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error opening pidfd %v", err)
+	}
+
+	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting fd %v", err)
+	}
+	defer unix.Close(localFd)
+
+	addr, _, err := getConnectionInfo(localFd, false)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting connection info: %v", err)
+	}
+
+	if isWhitelistedAddress(allowedTCPOriginMap, addr) {
+		logger.Info().Msgf("Allowed listen to %s", addr)
+		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	}
+
+	logger.Warn().Msgf("Blocked listen to %s", addr)
+	return 0, 0, 0
 }
 
 func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
@@ -652,7 +736,7 @@ func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
 		return true
 	}
 
-	if isWhitelistedAddress(address.String()) {
+	if isWhitelistedAddress(allowedAddressesMap, address.String()) {
 		return true
 	}
 
@@ -1068,16 +1152,15 @@ func initializeAuthData() {
 	}
 }
 
-func loadAllowedAddresses(addresses []string) {
-	allowedAddressesMap = make(map[string]struct{}, len(addresses))
-	for _, addr := range addresses {
-		allowedAddressesMap[addr] = struct{}{} // Empty struct uses zero memory
-	}
+func loadAllowedAddresses(addressMap map[string]struct{}, addresses []string) {
+    for _, addr := range addresses {
+        addressMap[addr] = struct{}{} // Empty struct uses zero memory
+    }
 }
 
-func isWhitelistedAddress(addr string) bool {
-	_, allowed := allowedAddressesMap[addr]
-	return allowed
+func isWhitelistedAddress(addressMap map[string]struct{}, addr string) bool {
+    _, allowed := addressMap[addr]
+    return allowed
 }
 
 func killProcessAndDescendants(pid int) error {
@@ -1300,4 +1383,31 @@ func checkCoreDumpLimit() error {
 
 	// Core dumps are enabled
 	return nil
+}
+
+// getConnectionInfo retrieves the connection information for a given file descriptor (fd).
+// It returns the address, family, and any error encountered.
+func getConnectionInfo(fd int, remote bool) (addr string, fam string, err error) {
+	var sa syscall.Sockaddr
+	if remote {
+		sa, err = syscall.Getpeername(fd)
+	} else {
+		sa, err = syscall.Getsockname(fd)
+	}
+	if err != nil {
+		return "", "", err
+	}
+
+	switch sa := sa.(type) {
+	case *syscall.SockaddrInet4:
+		ip := net.IP(sa.Addr[:]).String()
+		return fmt.Sprintf("%s:%d", ip, sa.Port), "ipv4", nil
+	case *syscall.SockaddrInet6:
+		ip := net.IP(sa.Addr[:]).String()
+		return fmt.Sprintf("[%s]:%d", ip, sa.Port), "ipv6", nil
+	case *syscall.SockaddrUnix:
+		return sa.Name, "unix", nil
+	default:
+		return "", "unknown", fmt.Errorf("unsupported sockaddr type: %T", sa)
+	}
 }
