@@ -306,7 +306,7 @@ func initSeccomp() chan <-struct{} {
 	}
 	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
 
-	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg}
+	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg, "sendmmsg": HandleSendmsg}
 
 	stop, errChan := Handle(fd, handlers)
 	go func() {
@@ -394,8 +394,8 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			continue
 		}
 
-		if proxydns && whitelist[sc] == "sendmsg"{
-			handledSyscalls["sendmsg"] = HandleSendmsg
+		if proxydns && (whitelist[sc] == "sendmsg" || whitelist[sc] == "sendmmsg") {
+			handledSyscalls[whitelist[sc]] = HandleSendmsg
 
 			continue
 		}
@@ -599,9 +599,15 @@ func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 	}
 	defer unix.Close(localFd)
 
-	_, port, _, err := getConnectionInfo(localFd, false)
+	_, port, _, err := getConnectionInfo(localFd, true)
 	if err != nil {
-		logger.Fatal().Msgf("Error getting connection info: %v", err)
+		if err == syscall.ENOTCONN {
+			// Connection not established yet
+			// Maybe confirm the address is not in the msghdr
+			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+		} else {
+			logger.Fatal().Msgf("Error getting connection info: %v", err)
+		}
 	}
 
 	if port == 53 {
