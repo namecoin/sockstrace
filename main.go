@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -254,10 +255,6 @@ Note:
 			proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
 			proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
 
-			if enforceSocks5TorAuth {
-				enforceSocks5Auth = true
-			}
-
 			loadAllowedAddresses(allowedAddressesMap,allowedAddresses)
 			loadAllowedAddresses(allowedTCPOriginMap,allowedTCPOrigin)
 
@@ -388,7 +385,7 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			return 0, err
 		}
 
-		if enforceSocks5Auth && whitelist[sc] == "sendto"{
+		if (enforceSocks5Auth || enforceSocks5TorAuth) && whitelist[sc] == "sendto"{
 			handledSyscalls["sendto"] = HandleSendto
 
 			continue
@@ -510,6 +507,25 @@ func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
 	}
 
+	tgid, err := getTgid(uint32(req.Pid))
+	if err != nil {
+		logger.Fatal().Msgf("Error getting tgid: %v", err)
+	}
+
+	pfd, err := pidfd.Open(tgid, 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error opening pidfd %v", err)
+	}
+
+	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting fd %v", err)
+	}
+	defer unix.Close(localFd)
+
+	// Log the socket protocol for the syscall
+	logSocketProtocol(localFd, int(req.Pid), "connect")
+
 	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
 	mem, err := os.Open(memFile)
 	if err != nil {
@@ -537,11 +553,31 @@ func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 }
 
 func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
-	logger.Info().Msgf("Intercepted 'sento' syscall from PID %d", req.Pid)
+	logger.Info().Msgf("Intercepted 'sendto' syscall from PID %d", req.Pid)
+
 	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
 	if err != nil {
 		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
 	}
+
+	tgid, err := getTgid(uint32(req.Pid))
+	if err != nil {
+		logger.Fatal().Msgf("Error getting tgid: %v", err)
+	}
+
+	pfd, err := pidfd.Open(tgid, 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error opening pidfd %v", err)
+	}
+
+	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting fd %v", err)
+	}
+	defer unix.Close(localFd)
+
+	// Log the socket protocol for the syscall
+	logSocketProtocol(localFd, int(req.Pid), "sendto")
 
 	fd := int(req.Data.Args[0])
 	state, exists := socks5States[fd]
@@ -598,6 +634,8 @@ func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 		logger.Fatal().Msgf("Error getting fd %v", err)
 	}
 	defer unix.Close(localFd)
+
+	logSocketProtocol(localFd, int(req.Pid), "sendmsg")
 
 	_, port, _, err := getConnectionInfo(localFd, true)
 	if err != nil {
@@ -844,7 +882,7 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
 	if socksTCPv4 == address.String() || socksTCPv6 == address.String() {
-		if enforceSocks5Auth {
+		if (enforceSocks5Auth || enforceSocks5TorAuth) {
 			socks5States[int(fd)] = &SOCKS5State{authCompleted: false}
 		}
 
@@ -1534,4 +1572,44 @@ func readBytes(mem *os.File, addr uint64, length uint64) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// getSocketType retrieves the type of socket associated with the given file descriptor (fd).
+func getSocketType(fd int) (string, error) {
+	sockType, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
+	if err != nil {
+		// Check if it's because the FD is not a socket
+		if errors.Is(err, unix.ENOTSOCK) {
+			return "", unix.ENOTSOCK
+		}
+		return "", fmt.Errorf("getsockopt failed: %w", err)
+	}
+
+	switch sockType {
+	case unix.SOCK_STREAM:
+		return "TCP", nil
+	case unix.SOCK_DGRAM:
+		return "UDP", nil
+	case unix.SOCK_RDM:
+		return "RDM", nil
+	case unix.SOCK_SEQPACKET:
+		return "SEQPACKET", nil
+	case unix.SOCK_PACKET:
+		return "PACKET", nil
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", sockType), nil
+	}
+}
+
+// logSocketProtocol logs the protocol type of a socket associated with a given file descriptor (dupFd).
+func logSocketProtocol(dupFd int, pid int, syscallName string) {
+	proto, err := getSocketType(dupFd)
+	switch {
+	case err == nil:
+		logger.Info().Msgf("FD %d is using protocol: %s (syscall: %s)", pid, proto, syscallName)
+	case errors.Is(err, unix.ENOTSOCK):
+		logger.Debug().Msgf("FD %d is not a socket, skipping (syscall: %s)", pid, syscallName)
+	default:
+		logger.Fatal().Msgf("failed to get socket type for FD %d (syscall: %s): %v", pid, syscallName, err)
+	}
 }
