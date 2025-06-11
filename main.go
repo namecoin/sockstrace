@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +59,7 @@ var (
 	enforceSocks5TorAuth bool
 	killAllTracees    bool
 	coreDump          bool
+	stackTrace		  bool
 	proxydns		  bool
 )
 
@@ -252,6 +254,10 @@ Note:
 				logger.Fatal().Msgf("Failed to parse Proxy IPv6 address: %v", err)
 			}
 
+			if stackTrace {
+				checkBinaryInPath("gdb") // Check if gdb is available for stack trace generation
+			}
+
 			proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
 			proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
 
@@ -283,7 +289,10 @@ Note:
 	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
-	rootCmd.Flags().BoolVar(&coreDump, "core-dump", false, "Enable core dump (default: false)")
+	rootCmd.Flags().BoolVar(&coreDump, "core-dump", false, "Generate core dump in case of proxy leak (default: false)")
+	// Note: On Linux with Yama LSM, you may get "ptrace: Operation not permitted" or "Could not attach to process" due to ptrace_scope.
+	// Fix: sudo sysctl -w kernel.yama.ptrace_scope=0
+	rootCmd.Flags().BoolVar(&stackTrace, "stack-trace", false, "Generate stack trace in case of proxy leak. Requires 'gdb' (default: false). On Linux with Yama, may need: sudo sysctl -w kernel.yama.ptrace_scope=0")
 	rootCmd.Flags().BoolVar(&proxydns, "proxydns", false, "Enable DNS proxying (default: false)")
 
 	return rootCmd
@@ -788,7 +797,13 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 		if err != nil {
 			logger.Fatal().Msgf("Error generating core dump: %v", err)
 		}
-		
+		os.Exit(0)
+	} else if stackTrace {
+		logger.Info().Msgf("Generating stack trace for PID %d", pid)
+		err := generateStackTrace(int(pid), tracee.Name, tracee.Args)
+		if err != nil {
+			logger.Fatal().Msgf("Error generating stack trace: %v", err)
+		}
 		os.Exit(0)
 	} else {
 		tgid, err := getTgid(pid)
@@ -1501,6 +1516,29 @@ func validateSOCKS5Auth(username, password string) error {
 	return nil
 }
 
+// generateStackTrace uses gdb to generate a stack trace for the given PID and saves it to a file.
+func generateStackTrace(pid int, name string, args []string) error {
+	outFile := filepath.Join(".", fmt.Sprintf("stacktrace_%d_%s_%s_%s.txt", pid, name, strings.Join(args, "_"), time.Now().Format("20060102_150405")))
+	f, err := os.Create(outFile)
+	if err != nil {
+		return fmt.Errorf("could not create output file: %w", err)
+	}
+	defer f.Close()
+
+	cmd := exec.Command(
+		"gdb", "-p", strconv.Itoa(pid), "--batch",
+		"-ex", "set pagination off",
+		"-ex", "thread apply all bt",
+		"-ex", "detach",
+		"-ex", "quit",
+	)
+	cmd.Stdout = f
+	cmd.Stderr = f
+
+	fmt.Printf("Dumping stack trace to %s...\n", outFile)
+	return cmd.Run()
+}
+
 // generateCoreDump sends SIGABRT to the given PID to trigger a core dump.
 // It does not attempt to move or rename the core dump file.
 func generateCoreDump(pid int) error {
@@ -1611,5 +1649,13 @@ func logSocketProtocol(dupFd int, pid int, syscallName string) {
 		logger.Debug().Msgf("FD %d is not a socket, skipping (syscall: %s)", pid, syscallName)
 	default:
 		logger.Fatal().Msgf("failed to get socket type for FD %d (syscall: %s): %v", pid, syscallName, err)
+	}
+}
+
+// checkBinaryInPath ensures that the given binary exists in $PATH.
+// If not found, it exits the program with a fatal log.
+func checkBinaryInPath(name string) {
+	if _, err := exec.LookPath(name); err != nil {
+		logger.Fatal().Msgf("%s not found in $PATH", name)
 	}
 }
