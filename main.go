@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +58,7 @@ var (
 	allowedTCPOrigin  []string
 	enforceSocks5Auth bool
 	enforceSocks5TorAuth bool
+	socks5IsolationRegex	      string
 	killAllTracees    bool
 	coreDump          bool
 	stackTrace		  bool
@@ -89,6 +91,9 @@ type SOCKS5State struct {
 
 // Tracks SOCKS5 state per FD
 var socks5States = make(map[int]*SOCKS5State)
+
+// Compiled regex for SOCKS5 isolation (prevents regex compilation on every call)
+var compiledSocks5IsolationRegex *regexp.Regexp
 
 // FullAddress is the network address and port
 type FullAddress struct {
@@ -288,6 +293,7 @@ Note:
 	rootCmd.Flags().StringSliceVar(&allowedTCPOrigin, "allowed-tcp-origin", []string{}, "List of allowed TCP origin addresses (--allowed-tcp-origin  127.0.0.1:9150,127.0.0.1:1080)")
 	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
 	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
+	rootCmd.Flags().StringVar(&socks5IsolationRegex, "socks5-isolation-regex", "", "Regex pattern to check against isolation string (default: empty)")
 	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
 	rootCmd.Flags().BoolVar(&coreDump, "core-dump", false, "Generate core dump in case of proxy leak (default: false)")
 	// Note: On Linux with Yama LSM, you may get "ptrace: Operation not permitted" or "Could not attach to process" due to ptrace_scope.
@@ -370,6 +376,19 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 		return 0, err
 	}
 
+	// If enforceSocks5TorAuth is true or socks5IsolationRegex is provided, set enforceSocks5Auth to true.
+	if enforceSocks5TorAuth || socks5IsolationRegex != "" {
+		// If SOCKS5 authentication is enforced or regex is provided, we need to handle the "sendto" syscall.
+		enforceSocks5Auth = true
+		// Validate regex pattern for SOCKS5 isolation if provided
+		if socks5IsolationRegex != "" {
+			compiledSocks5IsolationRegex, err = regexp.Compile(socks5IsolationRegex)
+			if err != nil {
+				logger.Fatal().Msgf("Invalid SOCKS5 isolation regex: %v", err)
+			}
+		}
+	}
+
 	// Define a set of syscalls that we want to block when blockIncomingTCP is true.
 	incomingTCPSyscalls := map[string]bool{
 		"bind":    true,
@@ -394,7 +413,7 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			return 0, err
 		}
 
-		if (enforceSocks5Auth || enforceSocks5TorAuth) && whitelist[sc] == "sendto"{
+		if enforceSocks5Auth && whitelist[sc] == "sendto"{
 			handledSyscalls["sendto"] = HandleSendto
 
 			continue
@@ -897,7 +916,7 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
 	if socksTCPv4 == address.String() || socksTCPv6 == address.String() {
-		if (enforceSocks5Auth || enforceSocks5TorAuth) {
+		if enforceSocks5Auth {
 			socks5States[int(fd)] = &SOCKS5State{authCompleted: false}
 		}
 
@@ -1509,8 +1528,20 @@ func validateSOCKS5Auth(username, password string) error {
 				}
 			default:
 				return fmt.Errorf("invalid SOCKS5 authentication: unrecognized format type '%c'", formatType)
-			}
+		}
 
+		logger.Info().Msgf(
+			"SOCKS5 authentication passed Tor format check: username='%s', password='%s' (format type: '%c')",
+			username, password, formatType,
+		)
+	}
+
+	if compiledSocks5IsolationRegex != nil {
+		if !compiledSocks5IsolationRegex.MatchString(password) {
+			return fmt.Errorf("SOCKS5 authentication rejected: password does not match isolation regex (pattern: %q). username='%s', password='%s'", socks5IsolationRegex, username, password)
+		}
+
+		logger.Info().Msgf("SOCKS5 authentication passed regex check (pattern: %q): username='%s', password='%s'", socks5IsolationRegex, username, password)
 	}
 
 	return nil
