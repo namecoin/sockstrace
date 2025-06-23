@@ -26,7 +26,12 @@ import (
 	"github.com/robertmin1/socks5/v4"
 	"github.com/rs/zerolog"
 	libseccomp "github.com/seccomp/libseccomp-golang"
-	"github.com/spf13/cobra"
+	"github.com/knadh/koanf/v2"
+	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/providers/posflag"
+	"github.com/spf13/pflag"
 	"golang.org/x/sys/unix"
 )
 
@@ -46,7 +51,6 @@ var (
 	args              []string
 	killProg          bool
 	logLeaks          bool
-	envVar            bool
 	redirect          string
 	proxyUser         string
 	proxyPass         string
@@ -141,6 +145,12 @@ var logger zerolog.Logger
 var allowedAddressesMap = make(map[string]struct{})
 var allowedTCPOriginMap = make(map[string]struct{})
 
+// Global koanf instance and CLI flag set
+var (
+	K     = koanf.New(".")
+	Flags = pflag.NewFlagSet("sockstrace", pflag.ExitOnError)
+)
+
 // The whitelist is obtained from:
 // https://en.wikibooks.org/wiki/The_Linux_Kernel/Syscalls
 // https://filippo.io/linux-syscall-table/
@@ -226,82 +236,96 @@ var whitelist = []string{
 }
 
 // Sets up the CLI command structure
-func setupCLI() *cobra.Command {
-	var rootCmd = &cobra.Command{
-		Use:   "sockstrace <program> [flags]",
-		Short: "A CLI tool for managing network proxying and security",
-		Long: `sockstrace allows you to run a program while applying network security features.
-		
+func setupCLI() {
+	const usage = `
+sockstrace is a tool to trace and monitor network connections made by a program,
+
 Usage:
-  sockstrace <program> [flags]
-  
+	sockstrace <program> [flags]
+	
 Examples:
-  sockstrace wget
-  sockstrace wget --args example.com
-  sockstrace wget --args "--directory-prefix=/home/r/Desktop" --args="google.com" (Each argument must be passed separately)
-  sockstrace wget --args example.com --logleaks true  (Allow Proxy Leaks and log them)
+	sockstrace wget
+	sockstrace wget --args example.com
+	sockstrace wget --args "--directory-prefix=/home" --args="google.com" (Each argument must be passed separately)
+	sockstrace wget --args example.com --logleaks (Allow Proxy Leaks and log them)
+
+Sources:
+	- CLI flags
+	- Environment variables (SOCKSTRACE_*) example: SOCKSTRACE_LOGLEAKS=true, SOCKSTRACE_KILL_PROG=true
+	- Config file (YAML) via --config
 
 Note:
-  - The first argument must always be the program you want to execute.
-  - Use --args to pass extra arguments to the program.`,
-		Args: cobra.MinimumNArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			stop := initSeccomp()
-			defer close(stop)
+	- The first argument must always be the program you want to execute.
+	- Use --args to pass extra arguments to the program.
 
-			proxyFullAddr4, err := NewFullAddress(socksTCPv4)
-			if err != nil {
-				logger.Fatal().Msgf("Failed to parse Proxy IPv4 address: %v", err)
-			}
+Flags:
+`
 
-			proxyFullAddr6, err := NewFullAddress(socksTCPv6)
-			if err != nil {
-				logger.Fatal().Msgf("Failed to parse Proxy IPv6 address: %v", err)
-			}
-
-			if stackTrace {
-				checkBinaryInPath("gdb") // Check if gdb is available for stack trace generation
-			}
-
-			proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
-			proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
-
-			loadAllowedAddresses(allowedAddressesMap,allowedAddresses)
-			loadAllowedAddresses(allowedTCPOriginMap,allowedTCPOrigin)
-
-			initializeAuthData()
-
-			runProgram(args[0]) // Handle program execution after flags are processed
-		},
+	Flags.Usage = func() {
+		fmt.Fprint(os.Stderr, usage)
+		Flags.PrintDefaults()
 	}
 
-	// Define flags
-	rootCmd.Flags().StringVar(&socksTCPv4, "socks-tcp", "127.0.0.1:9050", "SOCKS TCP4 address")
-	rootCmd.Flags().StringVar(&socksTCPv6, "socks-tcp6", "[::1]:9050", "SOCKS TCP6 address (IPv6)")
-	rootCmd.Flags().StringSliceVar(&args, "args", []string{}, "Arguments to pass to the program")
-	rootCmd.Flags().BoolVar(&killProg, "kill-prog", false, "Kill program on proxy leak (default: false)")
-	rootCmd.Flags().BoolVar(&logLeaks, "logleaks", false, "Allow and log proxy leaks (default: false)")
-	rootCmd.Flags().BoolVar(&envVar, "env-var", true, "Use environment variables for SOCKS")
-	rootCmd.Flags().StringVar(&redirect, "redirect", "socks5", "Redirect leaked connections (options: socks5, http)")
-	rootCmd.Flags().StringVar(&proxyUser, "proxy-user", "", "Proxy username")
-	rootCmd.Flags().StringVar(&proxyPass, "proxy-pass", "", "Proxy password")
-	rootCmd.Flags().BoolVar(&oneCircuit, "one-circuit", false, "Disable random SOCKS behavior (default: false) If a user provides a username or password, those credentials will be used for all connections.")
-	rootCmd.Flags().BoolVar(&whitelistLoopback, "whitelist-loopback", false, "Allow loopback connections (default: false)")
-	rootCmd.Flags().BoolVar(&allowNonTCP, "allow-non-tcp", true, "Allow non-TCP connections (Tor Proxy only supports TCP)")
-	rootCmd.Flags().BoolVar(&blockIncomingTCP, "block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
-	rootCmd.Flags().StringSliceVar(&allowedAddresses, "allowed-addresses", []string{}, "List of allowed addresses (--allowed-addrs 127.0.0.1:9150,192.168.1.100:1080)")
-	rootCmd.Flags().StringSliceVar(&allowedTCPOrigin, "allowed-tcp-origin", []string{}, "List of allowed TCP origin addresses (--allowed-tcp-origin  127.0.0.1:9150,127.0.0.1:1080)")
-	rootCmd.Flags().BoolVar(&enforceSocks5Auth, "enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
-	rootCmd.Flags().BoolVar(&enforceSocks5TorAuth, "enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
-	rootCmd.Flags().StringVar(&socks5IsolationRegex, "socks5-isolation-regex", "", "Regex pattern to check against isolation string (default: empty)")
-	rootCmd.Flags().BoolVar(&killAllTracees, "kill-all-tracees", false, "Kill all traced processes (default: false)")
-	rootCmd.Flags().BoolVar(&coreDump, "core-dump", false, "Generate core dump in case of proxy leak (default: false)")
+	Flags.String("socks-tcp", "127.0.0.1:9050", "SOCKS TCP4 address")
+	Flags.String("socks-tcp6", "[::1]:9050", "SOCKS TCP6 address (IPv6)")
+	Flags.StringSlice("args", []string{}, "Arguments to pass to the program")
+	Flags.Bool("kill-prog", false, "Kill program on proxy leak (default: false)")
+	Flags.Bool("logleaks", false, "Allow and log proxy leaks (default: false)")
+	Flags.String("redirect", "socks5", "Redirect leaked connections (options: socks5, http)")
+	Flags.String("proxy-user", "", "Proxy username")
+	Flags.String("proxy-pass", "", "Proxy password")
+	Flags.Bool("one-circuit", false, "Disable random SOCKS behavior (default: false) If a user provides a username or password, those credentials will be used for all connections.")
+	Flags.Bool("whitelist-loopback", false, "Allow loopback connections (default: false)")
+	Flags.Bool("allow-non-tcp", true, "Allow non-TCP connections (Tor Proxy only supports TCP) (default: true)")
+	Flags.Bool("block-incoming-tcp", false, "Block incoming TCP connections (default: false)")
+	Flags.StringSlice("allowed-addresses", []string{}, "List of allowed addresses (--allowed-addrs 127.0.0.1:9150,192.168.1.100:1080)")
+	Flags.StringSlice("allowed-tcp-origin", []string{}, "List of allowed TCP origin addresses (--allowed-tcp-origin  127.0.0.1:9150,127.0.0.1:1080)")
+	Flags.Bool("enforce-socks5-auth", false, "Enforce SOCKS5 authentication (default: false)")
+	Flags.Bool("enforce-socks5-tor-auth", false, "Enforce SOCKS5 authentication (default: false)")
+	Flags.String("socks5-isolation-regex", "", "Regex pattern to check against isolation string")
+	Flags.Bool("kill-all-tracees", false, "Kill all traced processes (default: false)")
+	Flags.Bool("core-dump", false, "Generate core dump in case of proxy leak (default: false)")
 	// Note: On Linux with Yama LSM, you may get "ptrace: Operation not permitted" or "Could not attach to process" due to ptrace_scope.
 	// Fix: sudo sysctl -w kernel.yama.ptrace_scope=0
-	rootCmd.Flags().BoolVar(&stackTrace, "stack-trace", false, "Generate stack trace in case of proxy leak. Requires 'gdb' (default: false). On Linux with Yama, may need: sudo sysctl -w kernel.yama.ptrace_scope=0")
-	rootCmd.Flags().BoolVar(&proxydns, "proxydns", false, "Enable DNS proxying (default: false)")
+	Flags.Bool("stack-trace", false, "Generate stack trace in case of proxy leak. Requires 'gdb' (default: false). On Linux with Yama, may need: sudo sysctl -w kernel.yama.ptrace_scope=0")
+	Flags.Bool("proxydns", false, "Enable DNS proxying (default: false)")
+	Flags.Bool("version", false, "Show version and exit")
+	Flags.String("config", "", "Path to optional YAML config file")
 
-	return rootCmd
+	Flags.Parse(os.Args[1:])
+	_ = K.Load(posflag.Provider(Flags, ".", K), nil)
+
+	// Load from config file
+	if cfg := K.String("config"); cfg != "" {
+		if err := K.Load(file.Provider(cfg), yaml.Parser()); err != nil {
+			logger.Fatal().Msgf("Failed to load config file %s: %v", cfg, err)
+		}
+	}
+
+	// Load from environment variables
+	_ = K.Load(env.Provider("SOCKSTRACE_", "", func(s string) string {
+		// Remove "SOCKSTRACE_" prefix manually
+		s = strings.TrimPrefix(s, "SOCKSTRACE_")
+		return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
+	}), nil)
+
+	// Re-parse CLI flags again to ensure they override all
+	_ = K.Load(posflag.Provider(Flags, ".", K), nil)
+	
+	// Show version
+	if K.Bool("version") {
+		logger.Info().Msg("sockstrace v1.2")
+		os.Exit(0)
+	}
+
+	// Require target program
+	if len(Flags.Args()) < 1 {
+		Flags.Usage()
+		logger.Fatal().Msg("No target program specified. Please provide a program to execute.")
+	}
+
+	bindConfigVars()
+	validateCLI()
 }
 
 func initSeccomp() chan <-struct{} {
@@ -321,6 +345,7 @@ func initSeccomp() chan <-struct{} {
 	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg, "sendmmsg": HandleSendmsg}
 
 	stop, errChan := Handle(fd, handlers)
+
 	go func() {
 		for err := range errChan {
 			logger.Fatal().Msgf("Error in syscall monitoring: %v", err)
@@ -330,9 +355,7 @@ func initSeccomp() chan <-struct{} {
 }
 
 func main() {
-	// Set up the CLI
-	rootCmd := setupCLI()
-
+	// Initialize logger
 	logger = zerolog.New(
 		zerolog.ConsoleWriter{
 			Out:        os.Stderr,           // Output to stderr
@@ -340,10 +363,30 @@ func main() {
 		},
 	).Level(zerolog.TraceLevel).With().Timestamp().Caller().Logger()
 
-	// Execute the CLI command
-	if err := rootCmd.Execute(); err != nil {
-		logger.Fatal().Msgf("Error executing program: %v", err)
+	setupCLI()
+
+	stop := initSeccomp()
+	defer close(stop)
+
+	proxyFullAddr4, err := NewFullAddress(socksTCPv4)
+	if err != nil {
+		logger.Fatal().Msgf("Failed to parse Proxy IPv4 address: %v", err)
 	}
+
+	proxyFullAddr6, err := NewFullAddress(socksTCPv6)
+	if err != nil {
+		logger.Fatal().Msgf("Failed to parse Proxy IPv6 address: %v", err)
+	}
+
+	proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
+	proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
+
+	loadAllowedAddresses(allowedAddressesMap,allowedAddresses)
+	loadAllowedAddresses(allowedTCPOriginMap,allowedTCPOrigin)
+
+	initializeAuthData()
+
+	runProgram(Flags.Args()[0]) // Handle program execution after flags are processed
 }
 
 
@@ -374,19 +417,6 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 	filter, err := libseccomp.NewFilter(libseccomp.ActErrno.SetReturnCode(int16(unix.EPERM)))
 	if err != nil {
 		return 0, err
-	}
-
-	// If enforceSocks5TorAuth is true or socks5IsolationRegex is provided, set enforceSocks5Auth to true.
-	if enforceSocks5TorAuth || socks5IsolationRegex != "" {
-		// If SOCKS5 authentication is enforced or regex is provided, we need to handle the "sendto" syscall.
-		enforceSocks5Auth = true
-		// Validate regex pattern for SOCKS5 isolation if provided
-		if socks5IsolationRegex != "" {
-			compiledSocks5IsolationRegex, err = regexp.Compile(socks5IsolationRegex)
-			if err != nil {
-				logger.Fatal().Msgf("Invalid SOCKS5 isolation regex: %v", err)
-			}
-		}
 	}
 
 	// Define a set of syscalls that we want to block when blockIncomingTCP is true.
@@ -759,8 +789,7 @@ func HandleBind(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) 
 	if isWhitelistedAddress(allowedTCPOriginMap, addr.String()) {
 		logger.Info().Msgf("Allowed bind to %s", addr.String())
 		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-	} 
-		
+	}
 	logger.Warn().Msgf("Blocked bind to %s", addr.String())
 
 	return 0, 0, 0
@@ -1573,11 +1602,6 @@ func generateStackTrace(pid int, name string, args []string) error {
 // generateCoreDump sends SIGABRT to the given PID to trigger a core dump.
 // It does not attempt to move or rename the core dump file.
 func generateCoreDump(pid int) error {
-	// Check if core dumps are allowed
-	if err := checkCoreDumpLimit(); err != nil {
-		return err
-	}
-
 	// Send SIGABRT
 	if err := syscall.Kill(pid, syscall.SIGABRT); err != nil {
 		return fmt.Errorf("failed to send SIGABRT to PID %d: %w", pid, err)
@@ -1680,6 +1704,62 @@ func logSocketProtocol(dupFd int, pid int, syscallName string) {
 		logger.Debug().Msgf("FD %d is not a socket, skipping (syscall: %s)", pid, syscallName)
 	default:
 		logger.Fatal().Msgf("failed to get socket type for FD %d (syscall: %s): %v", pid, syscallName, err)
+	}
+}
+
+// bindConfigVars binds the configuration variables from the command line arguments to global variables
+func bindConfigVars() {
+	socksTCPv4 = K.String("socks-tcp")
+	socksTCPv6 = K.String("socks-tcp6")
+	redirect = K.String("redirect")
+	args = K.Strings("args")
+	killProg = K.Bool("kill-prog")
+	logLeaks = K.Bool("logleaks")
+	killAllTracees = K.Bool("kill-all-tracees")
+	coreDump = K.Bool("core-dump")
+	stackTrace = K.Bool("stack-trace")
+	proxyUser = K.String("proxy-user")
+	proxyPass = K.String("proxy-pass")
+	enforceSocks5Auth = K.Bool("enforce-socks5-auth")
+	enforceSocks5TorAuth = K.Bool("enforce-socks5-tor-auth")
+	socks5IsolationRegex = K.String("socks5-isolation-regex")
+	oneCircuit = K.Bool("one-circuit")
+	allowedAddresses = K.Strings("allowed-addresses")
+	allowedTCPOrigin = K.Strings("allowed-tcp-origin")
+	whitelistLoopback = K.Bool("whitelist-loopback")
+	allowNonTCP = K.Bool("allow-non-tcp")
+	blockIncomingTCP = K.Bool("block-incoming-tcp")
+	proxydns = K.Bool("proxydns")
+}
+
+func validateCLI() {
+	if redirect != "socks5" && redirect != "http" {
+		logger.Fatal().Msgf("Invalid redirect value: %s (must be 'socks5' or 'http')", redirect)
+	}
+
+	if stackTrace {
+		checkBinaryInPath("gdb")
+	}
+
+	// Check if core dumps are allowed
+	if coreDump {
+		if err := checkCoreDumpLimit(); err != nil {
+			logger.Fatal().Msgf("Core dump limit check failed: %v", err)
+		}
+	}
+
+	// If enforceSocks5TorAuth is true or socks5IsolationRegex is provided, set enforceSocks5Auth to true.
+	if enforceSocks5TorAuth || socks5IsolationRegex != "" {
+		// If SOCKS5 authentication is enforced or regex is provided, we need to handle the "sendto" syscall.
+		enforceSocks5Auth = true
+		// Validate regex pattern for SOCKS5 isolation if provided
+		if socks5IsolationRegex != "" {
+			var err error
+			compiledSocks5IsolationRegex, err = regexp.Compile(socks5IsolationRegex)
+			if err != nil {
+				logger.Fatal().Msgf("Invalid SOCKS5 isolation regex: %v", err)
+			}
+		}
 	}
 }
 
