@@ -1654,7 +1654,8 @@ func getConnectionInfo(fd int, remote bool) (addr string, port int, fam string, 
 	case *syscall.SockaddrUnix:
 		return sa.Name, 0, "unix", nil
 	default:
-		return "", 0, "unknown", fmt.Errorf("unsupported sockaddr type: %T", sa)
+		// We don't handle this socket address type
+		return "", 0, fmt.Sprintf("%T", sa), nil
 	}
 }
 
