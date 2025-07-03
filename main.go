@@ -342,7 +342,7 @@ func initSeccomp() chan <-struct{} {
 	}
 	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
 
-	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg, "sendmmsg": HandleSendmsg}
+	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg, "sendmmsg": HandleSendmsg, "writev": HandleWritev}
 
 	stop, errChan := Handle(fd, handlers)
 
@@ -449,8 +449,13 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			continue
 		}
 
-		if proxydns && (whitelist[sc] == "sendmsg" || whitelist[sc] == "sendmmsg") {
-			handledSyscalls[whitelist[sc]] = HandleSendmsg
+		if proxydns && (whitelist[sc] == "sendmsg" || whitelist[sc] == "sendmmsg" || whitelist[sc] == "writev") {
+			switch whitelist[sc] {
+			case "sendmsg", "sendmmsg":
+				handledSyscalls[whitelist[sc]] = HandleSendmsg
+			case "writev":
+				handledSyscalls[whitelist[sc]] = HandleWritev
+			}
 
 			continue
 		}
@@ -752,9 +757,10 @@ func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 			logger.Info().Msgf("No DNS question found")
 		} else {
 			for _, question := range m.Question {
-				logger.Info().Msgf("DNS question: %s", question.Name)
+				logger.Info().Msgf("DNS-over-UDP question: %s", question.Name)
 			}
 		}
+		// TODO : Route the request through tor and send it back to the process
 	}
 
 	// Default behavior is to allow the connection
@@ -830,6 +836,94 @@ func HandleListen(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 
 	logger.Warn().Msgf("Blocked listen to %s", addr)
 	return 0, 0, 0
+}
+
+func HandleWritev(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	logger.Info().Msgf("Intercepted 'writev' syscall from PID %d", req.Pid)
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
+
+	tgid, err := getTgid(uint32(req.Pid))
+	if err != nil {
+		logger.Fatal().Msgf("Error getting tgid: %v", err)
+	}
+
+	pfd, err := pidfd.Open(tgid, 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error opening pidfd %v", err)
+	}
+
+	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting fd %v", err)
+	}
+	defer unix.Close(localFd)
+
+	_, port, _, err := getConnectionInfo(localFd, true)
+	if err != nil {
+		if err == syscall.ENOTCONN {
+			// Connection not established yet
+			// Maybe confirm the address is not in the msghdr
+			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+		} else {
+			logger.Fatal().Msgf("Error getting connection info: %v", err)
+		}
+	}
+
+	if port == 53 {
+		// DNS request
+		memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+		mem, err := os.Open(memFile)
+		if err != nil {
+			logger.Fatal().Msgf("failed to open memory file: %v", err)
+		}
+		defer mem.Close()
+
+		iovCount := int(req.Data.Args[2])
+		if iovCount != 2 {
+			logger.Fatal().Msgf("Unexpected iovec count: %d, expected 2 (DNS over TCP requirements)", iovCount)
+		}
+		
+		iovecSize := binary.Size(iovec{})
+		totalSize := iovecSize * iovCount
+
+		iovecsRaw := make([]byte, totalSize)
+		_, err = syscall.Pread(int(mem.Fd()), iovecsRaw, int64(req.Data.Args[1]))
+		if err != nil {
+			logger.Fatal().Msgf("failed to read iovec array: %v", err)
+		}
+
+		// Decode into a slice of iovec
+		iovecs := make([]iovec, iovCount)
+		if err := binary.Read(bytes.NewReader(iovecsRaw), binary.LittleEndian, &iovecs); err != nil {
+			logger.Fatal().Msgf("failed to decode iovec array: %v", err)
+		}
+
+		secondIov := iovecs[1]
+		dnsData, err := readBytes(mem, secondIov.Base, secondIov.Len)
+		if err != nil {
+			logger.Fatal().Msgf("failed to read DNS data: %v", err)
+		}
+
+		// Parse DNS message
+		var m dns.Msg
+		if err := m.Unpack(dnsData); err != nil {
+			logger.Fatal().Msgf("failed to unpack DNS message: %v", err)
+		}
+		if len(m.Question) == 0 {
+			logger.Warn().Msgf("No DNS question found")
+		} else {
+			for _, question := range m.Question {
+				logger.Info().Msgf("DNS-over-TCP question: %s", question.Name)
+			}
+		}
+
+		// TODO : Route the request through tor and send it back to the process
+	}
+	// Default behavior is to allow the connection
+	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 }
 
 func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
