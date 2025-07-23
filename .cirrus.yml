@@ -9,16 +9,14 @@ task:
   install_script:
     - apt-get update
     - apt-get install -y libseccomp-dev pkg-config build-essential
-  # interfacebloat complains about miekg/pkcs11 API's that we can't change.
-  # nosnakecase complains about miekg/pkcs11 API's that we can't change.
-  lint_script: golangci-lint run --enable-all --disable exhaustivestruct,exhaustruct,gochecknoglobals,gochecknoinits,interfacebloat,nosnakecase,gomoddirectives,lll,godot,tagalign,godox $GOLANGCI_ARGS -v --out-format json > lint-report.json
+  lint_script: golangci-lint run --default=all --disable exhaustruct,gochecknoglobals,gochecknoinits,interfacebloat,gomoddirectives,lll,godot,tagalign,godox,depguard,funlen,gocognit,gosec,nestif,noinlineerr,cyclop,err113 $GOLANGCI_ARGS -v --output.json.path=lint-report.json
   matrix:
     - name: Go Lint New
       env:
         GOLANGCI_ARGS: "--new-from-rev=HEAD~"
     - name: Go Lint Mandatory
       env:
-        GOLANGCI_ARGS: "--disable=cyclop,dupl,gci,godox,goerr113,gomnd,gosimple,ifshort,lll,nosnakecase,revive,varnamelen,wrapcheck"
+        GOLANGCI_ARGS: "--disable=cyclop,dupl,godox,err113,mnd,staticcheck,lll,revive,varnamelen,wrapcheck"
     - name: Go Lint
       env:
         GOLANGCI_ARGS: ""
@@ -28,7 +26,7 @@ task:
       path: lint-report.json
       type: text/json
       format: golangci
-  
+
 task:
   name: ShellCheck
   container:
