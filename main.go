@@ -430,7 +430,7 @@ func runProgram(program string) {
 func LoadFilter() (libseccomp.ScmpFd, error) {
 	filter, err := libseccomp.NewFilter(libseccomp.ActErrno.SetReturnCode(int16(unix.EPERM)))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to create seccomp filter: %w", err)
 	}
 
 	// Define a set of syscalls that we want to block when blockIncomingTCP is true.
@@ -454,7 +454,7 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 	for sc := range whitelist {
 		syscallID, err := libseccomp.GetSyscallFromName(whitelist[sc])
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("failed to get syscall ID for %s: %w", whitelist[sc], err)
 		}
 
 		if enforceSocks5Auth && whitelist[sc] == "sendto"{
@@ -481,7 +481,7 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 
 		err = filter.AddRule(syscallID, libseccomp.ActAllow)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("failed to add rule for syscall %s: %w", whitelist[sc], err)
 		}
 	}
 
@@ -491,22 +491,22 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 	for sc := range handledSyscalls {
 		syscallID, err := libseccomp.GetSyscallFromName(sc)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("failed to get syscall ID for %s: %w", sc, err)
 		}
 
 		err = filter.AddRule(syscallID, libseccomp.ActNotify)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("failed to add notify rule for syscall %s: %w", sc, err)
 		}
 	}
 
 	if err := filter.Load(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to load seccomp filter: %w", err)
 	}
 
 	fd, err := filter.GetNotifFd()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to get notification FD: %w", err)
 	}
 
 	return fd, nil
@@ -764,9 +764,9 @@ func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 			// Connection not established yet
 			// Maybe confirm the address is not in the msghdr
 			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-		} else {
-			logger.Fatal().Msgf("Error getting connection info: %v", err)
 		}
+
+		logger.Fatal().Msgf("Error getting connection info: %v", err)
 	}
 
 	if port == DNSPort { //nolint:nestif //TODO: Will be handled 
@@ -955,9 +955,9 @@ func HandleWritev(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 			// Connection not established yet
 			// Maybe confirm the address is not in the msghdr
 			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-		} else {
-			logger.Fatal().Msgf("Error getting connection info: %v", err)
 		}
+
+		logger.Fatal().Msgf("Error getting connection info: %v", err)
 	}
 
 	if port == DNSPort { //nolint:nestif //TODO: Will be handled 
@@ -1346,7 +1346,7 @@ func ParseAddress(socketaddr []byte) (FullAddress, error) {
 func getTgid(pid uint32) (int, error) {
 	file, err := os.Open(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to open /proc/%d/status: %w", pid, err)
 	}
 
 	defer func() {
@@ -1581,7 +1581,7 @@ func GenerateRandomCredentials() (string, error) {
 
 	bytes := make([]byte, credentialLength)
 	if _, err := rand.Read(bytes); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 
 	return hex.EncodeToString(bytes), nil
@@ -1764,7 +1764,7 @@ func killProcessByID(pid int) error {
 	// Send SIGKILL to the main process (TGID)
 	err := syscall.Kill(pid, syscall.SIGKILL)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to kill process with ID %d: %w", pid, err)
 	}
 
 	logger.Warn().Msgf("Successfully killed process with ID %d\n", pid)
@@ -1851,7 +1851,11 @@ func generateStackTrace(pid int, name string, args []string) error {
 
 	logger.Warn().Msgf("Dumping stack trace to %s...", outFile)
 
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run command %q: %w", cmd.String(), err)
+	}
+
+	return nil
 }
 
 // generateCoreDump sends SIGABRT to the given PID to trigger a core dump.
@@ -1900,7 +1904,7 @@ func getConnectionInfo(socketFD int, remote bool) (string, int, string, error) {
 	}
 
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", fmt.Errorf("failed to get socket address: %w", err)
 	}
 
 	switch sa := sa.(type) {
@@ -1924,7 +1928,7 @@ func readBytes(mem *os.File, addr uint64, length uint64) ([]byte, error) {
 	// Use syscall.Pread to read bytes from the memory file descriptor
 	_, err := syscall.Pread(int(mem.Fd()), buf, int64(addr))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read bytes from memory at address 0x%x: %w", addr, err)
 	}
 
 	return buf, nil
