@@ -164,15 +164,16 @@ var whitelist = []string{
 	"syslog", "sysinfo", "sysfs", "_sysctl", "query_module", "get_kernel_syms", "create_module", 
 	"init_module", "delete_module", "iopl", "ioperm", "acct", "reboot", "swapon", "swapoff", 
 	"mount", "umount2", "sync", "syncfs", "vhangup", "modify_ldt", "pivot_root", "nfsservctl", 
-	"quotactl", "membarrier", "rseq", "bpf", "getrandom", "ptrace", "getcpu","ioctl", 
-	"finit_module", "personality", "setgroups", "uname",
+	"quotactl", "membarrier", "rseq", "bpf", "getrandom", "ptrace", "getcpu","finit_module", 
+	"personality", "uname", "uselib", "chroot", "mount_setattr", "fanotify_init", "fanotify_mark",
+	"perf_event_open", "kexec_load", "kexec_file_load", "setdomainname", "sethostname",
 
 	// Time
 	"time", "gettimeofday", "settimeofday", "clock_settime", "clock_gettime", "clock_getres", 
 	"clock_nanosleep", "timer_create", "timer_settime", "timer_gettime", "timer_getoverrun", 
 	"timer_delete", "timerfd_create", "timerfd_settime", "timerfd_gettime", "clock_adjtime", 
 	"adjtimex", "utime", "utimes", "utimensat", "futimesat", "nanosleep", "alarm", "getitimer", 
-	"setitimer", "eventfd2", "eventfd", "times",
+	"setitimer", "times",
 
 	// Processes
 	"getpid", "getppid", "gettid", "getpgid", "setpgid", "getpgrp", "setsid", "getsid", "fork", 
@@ -183,7 +184,8 @@ var whitelist = []string{
 	"sched_yield", "sched_setattr", "sched_getattr", "set_tid_address", "restart_syscall", "kill", 
 	"pidfd_send_signal", "pidfd_open", "pidfd_getfd", "process_madvise", "process_mrelease", "kcmp", 
 	"get_thread_area","getresgid", "setresuid", "unshare", "setregid", "getresuid", "setns", "geteuid", 
-	"setreuid", "getgroups", "uselib", "setresgid", "setuid","set_thread_area", "getuid", "setgid", "getgid",
+	"setreuid", "getgroups", "setresgid", "setuid","set_thread_area", "getuid", "setgid", "getgid",
+	"setgroups", "ioprio_set", "ioprio_get",
 
 	// Synchronization
 	"futex", "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "rt_sigpending", "rt_sigtimedwait",
@@ -191,37 +193,73 @@ var whitelist = []string{
 	"signalfd", "signalfd4", "semget", "semop", "mq_getsetattr","semctl", "semtimedop", "msgget", 
 	"msgsnd", "msgrcv", "msgctl", "shmget", "shmat", "shmctl", "shmdt", "mq_timedreceive","set_robust_list", 
 	"get_robust_list", "futex_wake", "futex_waitv", "futex_wait", "futex_requeue", "mq_timedsend", "mq_open",
-	"mq_notify", "mq_unlink", 
+	"mq_notify", "mq_unlink", "eventfd", "eventfd2",
 
 	// Memory
 	"mmap", "mprotect", "munmap", "mremap", "msync", "mincore", "madvise", "brk", "mlock",
 	"munlock", "mlockall", "munlockall", "mlock2", "remap_file_pages","memfd_create", "memfd_secret", 
 	"set_mempolicy_home_node", "pkey_mprotect", "pkey_alloc", "pkey_free", "cachestat", "map_shadow_stack",
-	"migrate_pages", "get_mempolicy", "set_mempolicy", "mbind",
+	"migrate_pages", "get_mempolicy", "set_mempolicy", "mbind", "move_pages", "userfaultfd",
 
 	// Metadata
 	"stat", "fstat", "lstat", "newfstatat", "statx", "getdents", "getdents64", "getcwd", "chdir", 
 	"fchdir", "rename", "renameat", "renameat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", 
 	"symlink", "symlinkat", "readlink", "readlinkat", "chmod", "fchmod", "fchmodat", "chown", "fchown", 
 	"lchown", "fchownat", "umask", "truncate", "ftruncate", "fallocate", "sync_file_range", "vmsplice", 
-	"inotify_init1","move_pages", "faccessat", "openat", "move_mount", "fsopen", "fsconfig", "fsmount", 
+	"inotify_init1", "faccessat", "openat", "move_mount", "fsopen", "fsconfig", "fsmount", 
 	"fspick", "inotify_init", "lookup_dcookie","name_to_handle_at", "open_by_handle_at", "statfs", 
 	"fstatfs", "ustat", "getxattr", "lgetxattr", "fgetxattr", "listxattr", "llistxattr", "flistxattr", 
 	"setxattr", "lsetxattr", "fsetxattr", "removexattr", "lremovexattr", "fremovexattr", "inotify_rm_watch",
-	"userfaultfd", "io_pgetevents", "open_tree", "quotactl_fd", "ioprio_set", "inotify_add_watch", "ioprio_get",
+	"open_tree", "quotactl_fd", "inotify_add_watch",
 
 	// Data
 	"read", "write", "pread64", "pwrite64", "readv", "writev", "preadv", "pwritev", "preadv2", "pwritev2",
 	"creat", "fsync","splice", "tee", "process_vm_readv", "process_vm_writev", "fchmodat2", "openat2", 
-	"faccessat2", "close_range", "copy_file_range", "mount_setattr","fcntl", "chroot", "pipe2", "flock", 
+	"faccessat2", "close_range", "copy_file_range", "fcntl", "pipe2", "flock", 
 	"open", "linkat", "pipe", "access", "mknod", "mknodat", "fadvise64", "readahead", "dup3", "dup", "dup2",
-	"fdatasync", "lseek", "link", "close",
+	"fdatasync", "lseek", "link", "close", "ioctl", "sendfile",
 
 	// Network (Excluding connect syscall)
-	"socket", "socketpair", "bind", "listen", "accept", "accept4", "getsockname", "getpeername", 
-	"sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown", "setsockopt", "getsockopt", "sendmmsg", 
-	"recvmmsg", "fanotify_init", "fanotify_mark", "perf_event_open", "kexec_load", "kexec_file_load", 
-	"socketcall", "sendfile", "sethostname", "setdomainname",
+	// Legend:
+	// A — Safe to whitelist.
+	// B — Temporarily whitelisted because denying it outright would break apps and we haven’t implemented tracer logic.
+	// C — Temporarily whitelisted because we haven’t audited whether it can cause proxy leaks.
+	// D — Not whitelisted here because we handle it elsewhere (or it’s obsolete / handled by kernel compatibility).
+	"socket", // A -> socket() only creates an endpoint and returns a file descriptor — it does not itself send network 
+	// traffic. Whitelisting it is reasonable if you still intercept the actual connect/send syscalls. See socket(2) 
+	// and the socket overview (https://man7.org/linux/man-pages/man2/socket.2.html)
+
+	"socketpair", // A -> like socket(), socketpair() creates a pair of connected sockets, but does not send data 
+	// over the network. (https://man7.org/linux/man-pages/man2/socketpair.2.html)
+
+	"bind", // B -> bind() assigns a local address/port to a socket. Denying bind would break legitimate server and 
+	// client behavior (such as ephemeral-port selection) (https://man7.org/linux/man-pages/man2/bind.2.html)
+
+	"listen", // B -> listen() marks a socket as a passive socket that will be used to accept incoming connection requests.
+	// Denying listen would break legitimate server behavior. (https://man7.org/linux/man-pages/man2/listen.2.html)
+
+	"accept", "accept4", // B -> accept() creates a new connected socket for incoming connections. Denying will break server flows
+	// https://man7.org/linux/man-pages/man2/accept.2.html
+
+	"getsockname", // A -> getsockname() retrieves the local address/port of a socket. Safe to whitelist.
+	// https://man7.org/linux/man-pages/man2/getsockname.2.html
+
+	"getpeername", // A -> getpeername() retrieves the remote address/port of a connected socket. Safe to whitelist.
+	// https://man7.org/linux/man-pages/man2/getpeername.2.html
+
+	"sendto", "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg", // C -> These perform actual data transfer and can cause leaks 
+	// depending on socket type (e.g. raw sockets). Until all usese are audited 
+	// (connected vs unconnected sockets, UDP vs TCP, raw/AF_PACKET), mark them as temporarily whitelisted pending audit.
+
+	"shutdown", // A -> shutdown() disables sends and/or receives on a socket. Safe to whitelist.
+	// https://man7.org/linux/man-pages/man2/shutdown.2.html
+
+	"setsockopt", "getsockopt", // B -> These change or query socket behavior (timeouts, buffer sizes, socket flags). 
+	// Denying them can break apps; but they can affect how traffic gets sent 
+	// (e.g., SO_BINDTODEVICE, SO_MARK, IP_HDRINCL). Temporarily whitelist with a TODO to audit which specific options are risky
+
+	"socketcall", // B -> On 32-bit ABIs (e.g. i386), all socket ops are multiplexed through this syscall. (socket, connect, bind, sendmsg, etc.)
+	// Denying it would break networking entirely for 32-bit apps, so it is whitelisted for now. 
 
 	// Security
 	"capget", "capset", "prctl", "arch_prctl", "seccomp", "landlock_create_ruleset", "landlock_add_rule", 
@@ -230,7 +268,7 @@ var whitelist = []string{
 	// Nonblocking IO
 	"poll", "ppoll", "select", "pselect6", "epoll_create", "epoll_create1", "epoll_ctl", "epoll_ctl_old",
 	"epoll_wait", "epoll_wait_old", "epoll_pwait", "epoll_pwait2", "io_setup", "io_destroy", "io_getevents", 
-	"io_submit", "io_cancel", "io_uring_setup", "io_uring_enter", "io_uring_register",
+	"io_submit", "io_cancel", "io_uring_setup", "io_uring_enter", "io_uring_register", "io_pgetevents",
 
 	// unimplemented system calls
 	// "afs_syscall", "break", "fattach", "fdetach", "ftime", "getmsg", "getpmsg", "gtty", "isastream", "lock", "madvise1", 
