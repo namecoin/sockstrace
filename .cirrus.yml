@@ -8,7 +8,7 @@ task:
     - go mod tidy
   install_script:
     - apt-get update
-    - apt-get install -y libseccomp-dev pkg-config build-essential
+    - apt-get install -y libseccomp-dev pkg-config build-essential 
   lint_script: golangci-lint run --default=all --disable exhaustruct,gochecknoglobals,gochecknoinits,interfacebloat,gomoddirectives,lll,godot,tagalign,godox,depguard,funlen,gocognit,gosec,nestif,noinlineerr,cyclop,err113,mnd,varnamelen $GOLANGCI_ARGS -v --output.json.path=lint-report.json
   matrix:
     - name: Go Lint New
@@ -26,6 +26,27 @@ task:
       path: lint-report.json
       type: text/json
       format: golangci
+
+task:
+  name: Socksification Tests
+  container:
+    image: golang:latest
+
+  install_script:
+    - apt-get update
+    - apt-get install -y wget curl libseccomp-dev pkg-config build-essential
+
+  build_script:
+    - go mod tidy
+    - go build -o sockstrace .
+    - cd testdata && go mod tidy
+
+  test_script:
+    - (cd testdata && go run socks5_server.go &) && sleep 3
+    - echo "Testing wget socksification..."
+    - ./sockstrace wget --args "https://check.torproject.org" --proxy-pass pass --proxy-user user
+    - echo "Testing curl socksification..."
+    - ./sockstrace curl --args "https://check.torproject.org" --proxy-pass pass --proxy-user user
 
 task:
   name: ShellCheck

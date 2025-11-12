@@ -1747,7 +1747,7 @@ func getChildren(pid int, tid int) ([]int, error) {
 	var children []int
 	// Split the read buffer into fields (PIDs)
 	// and convert them to integers
-	for _, p := range strings.Fields(string(buf[:n])) {
+	for p := range strings.FieldsSeq(string(buf[:n])) {
 		if childPid, err := strconv.Atoi(p); err == nil {
 			children = append(children, childPid)
 		}
