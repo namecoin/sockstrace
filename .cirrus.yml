@@ -49,6 +49,29 @@ task:
     - ./sockstrace curl --args "https://check.torproject.org" --proxy-pass pass --proxy-user user
 
 task:
+  name: WebRTC Firefox Test
+  container:
+    image: golang:latest
+  environment:
+    NO_AUTH: "1"   # SOCKS5 server will run without auth
+
+  install_script:
+    - apt-get update
+    - apt-get install -y libseccomp-dev pkg-config build-essential firefox-esr
+
+  build_script:
+    - go mod tidy
+    - go build -o sockstrace .
+    - cd testdata && go mod tidy
+
+  test_script:
+    - (cd testdata && go run socks5_server.go &) && sleep 3
+     # Set up Firefox profile (hardcoded)
+    - bash testdata/setup_firefox_profile.sh
+    - echo "Testing Firefox via SOCKS5 proxy..."
+    - timeout 60 ./sockstrace firefox --args "https://browserleaks.com/webrtc" --args "-P" --args "proxy-profile" --args "--headless" --logleaks || [ $? -eq 124 ]
+
+task:
   name: ShellCheck
   container:
     image: fedora:latest
