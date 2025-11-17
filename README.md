@@ -73,7 +73,7 @@ sudo systemctl restart tor
 
 ## Licence
 
-Copyright (C) 2022 Namecoin Developers.
+Copyright (C) 2022-2025 Namecoin Developers.
 
 SocksTrace is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
