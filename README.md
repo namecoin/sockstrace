@@ -8,7 +8,7 @@ Prerequisites:
 
 2. Install the `libseccomp` library, which is required for seccomp tracing:
 
-3. `GCC` is required to compile C parts of libseccomp used by Go via cgo. (We are planning to use a Go-based implementation of libseccomp in the future)
+3. `GCC` is required to compile C parts of `libseccomp` used by Go via cgo. (We are planning to use a Go-based reimplementation of `libseccomp` in the future)
 
 4. `pkg-config` to locate libseccomp headers and libraries during build.
 
@@ -24,9 +24,9 @@ sudo dnf install libseccomp-devel
 ```
 
 ### Using Go build commands with Go modules
-1. Clone [sockstrace](https://github.com/namecoin/sockstrace) 
+1. `git clone https://github.com/namecoin/sockstrace.git`
 
-2. `cd` sockstrace
+2. `cd sockstrace`
 
 3. Set up Go modules
 ```
