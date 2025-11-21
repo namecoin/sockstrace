@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 The Namecoin Project <www.namecoin.org>
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package main
 
 import (
