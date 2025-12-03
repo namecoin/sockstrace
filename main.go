@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -46,27 +48,27 @@ var tracee struct {
 type SyscallHandler func(fd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (val uint64, errno int32, flags uint32)
 
 var (
-	socksTCPv4        string
-	socksTCPv6        string
-	args              []string
-	killProg          bool
-	logLeaks          bool
-	redirect          string
-	proxyUser         string
-	proxyPass         string
-	oneCircuit        bool
-	whitelistLoopback bool
-	allowNonTCP		  bool
-	blockIncomingTCP  bool
-	allowedAddresses  []string
-	allowedTCPOrigin  []string
-	enforceSocks5Auth bool
+	socksTCPv4           string
+	socksTCPv6           string
+	args                 []string
+	killProg             bool
+	logLeaks             bool
+	redirect             string
+	proxyUser            string
+	proxyPass            string
+	oneCircuit           bool
+	whitelistLoopback    bool
+	allowNonTCP          bool
+	blockIncomingTCP     bool
+	allowedAddresses     []string
+	allowedTCPOrigin     []string
+	enforceSocks5Auth    bool
 	enforceSocks5TorAuth bool
-	socks5IsolationRegex	      string
-	killAllTracees    bool
-	coreDump          bool
-	stackTrace		  bool
-	proxydns		  bool
+	socks5IsolationRegex string
+	killAllTracees       bool
+	coreDump             bool
+	stackTrace           bool
+	proxydns             bool
 )
 
 var (
@@ -86,11 +88,11 @@ var authData []struct {
 
 // SOCKS5State tracks handshake and authentication per FD
 type SOCKS5State struct {
-	buffer       bytes.Buffer
-	authCompleted bool
+	buffer             bytes.Buffer
+	authCompleted      bool
 	handshakeCompleted bool
-	username     string
-	password     string
+	username           string
+	password           string
 }
 
 // Tracks SOCKS5 state per FD
@@ -124,23 +126,6 @@ type HTTPDialer struct {
 	Password string
 }
 
-type msghdr struct {
-	Name       uint64
-	Namelen    uint32
-	_          uint32 // align
-	Iov        uint64
-	Iovlen     uint64
-	Control    uint64
-	Controllen uint64
-	Flags      int32
-	_          uint32 // align
-}
-
-type iovec struct {
-	Base uint64
-	Len  uint64
-}
-
 var logger zerolog.Logger
 var allowedAddressesMap = make(map[string]struct{})
 var allowedTCPOriginMap = make(map[string]struct{})
@@ -161,61 +146,61 @@ var (
 // The "gethostname" syscall is in the first link but doesn't seem to be supported.
 var whitelist = []string{
 	// System
-	"syslog", "sysinfo", "sysfs", "_sysctl", "query_module", "get_kernel_syms", "create_module", 
-	"init_module", "delete_module", "iopl", "ioperm", "acct", "reboot", "swapon", "swapoff", 
-	"mount", "umount2", "sync", "syncfs", "vhangup", "modify_ldt", "pivot_root", "nfsservctl", 
-	"quotactl", "membarrier", "rseq", "bpf", "getrandom", "ptrace", "getcpu","finit_module", 
+	"syslog", "sysinfo", "sysfs", "_sysctl", "query_module", "get_kernel_syms", "create_module",
+	"init_module", "delete_module", "iopl", "ioperm", "acct", "reboot", "swapon", "swapoff",
+	"mount", "umount2", "sync", "syncfs", "vhangup", "modify_ldt", "pivot_root", "nfsservctl",
+	"quotactl", "membarrier", "rseq", "bpf", "getrandom", "ptrace", "getcpu", "finit_module",
 	"personality", "uname", "uselib", "chroot", "mount_setattr", "fanotify_init", "fanotify_mark",
 	"perf_event_open", "kexec_load", "kexec_file_load", "setdomainname", "sethostname",
 
 	// Time
-	"time", "gettimeofday", "settimeofday", "clock_settime", "clock_gettime", "clock_getres", 
-	"clock_nanosleep", "timer_create", "timer_settime", "timer_gettime", "timer_getoverrun", 
-	"timer_delete", "timerfd_create", "timerfd_settime", "timerfd_gettime", "clock_adjtime", 
-	"adjtimex", "utime", "utimes", "utimensat", "futimesat", "nanosleep", "alarm", "getitimer", 
+	"time", "gettimeofday", "settimeofday", "clock_settime", "clock_gettime", "clock_getres",
+	"clock_nanosleep", "timer_create", "timer_settime", "timer_gettime", "timer_getoverrun",
+	"timer_delete", "timerfd_create", "timerfd_settime", "timerfd_gettime", "clock_adjtime",
+	"adjtimex", "utime", "utimes", "utimensat", "futimesat", "nanosleep", "alarm", "getitimer",
 	"setitimer", "times",
 
 	// Processes
-	"getpid", "getppid", "gettid", "getpgid", "setpgid", "getpgrp", "setsid", "getsid", "fork", 
-	"vfork", "clone", "clone3", "execve", "getegid","execveat", "exit", "exit_group", "wait4", 
-	"waitid", "getpriority", "setpriority", "getrlimit", "setrlimit", "prlimit64", "getrusage", 
-	"sched_setparam", "sched_getparam", "sched_setscheduler", "sched_getscheduler", "sched_get_priority_max", 
-	"sched_get_priority_min", "sched_rr_get_interval", "sched_setaffinity", "sched_getaffinity", 
-	"sched_yield", "sched_setattr", "sched_getattr", "set_tid_address", "restart_syscall", "kill", 
-	"pidfd_send_signal", "pidfd_open", "pidfd_getfd", "process_madvise", "process_mrelease", "kcmp", 
-	"get_thread_area","getresgid", "setresuid", "unshare", "setregid", "getresuid", "setns", "geteuid", 
-	"setreuid", "getgroups", "setresgid", "setuid","set_thread_area", "getuid", "setgid", "getgid",
+	"getpid", "getppid", "gettid", "getpgid", "setpgid", "getpgrp", "setsid", "getsid", "fork",
+	"vfork", "clone", "clone3", "execve", "getegid", "execveat", "exit", "exit_group", "wait4",
+	"waitid", "getpriority", "setpriority", "getrlimit", "setrlimit", "prlimit64", "getrusage",
+	"sched_setparam", "sched_getparam", "sched_setscheduler", "sched_getscheduler", "sched_get_priority_max",
+	"sched_get_priority_min", "sched_rr_get_interval", "sched_setaffinity", "sched_getaffinity",
+	"sched_yield", "sched_setattr", "sched_getattr", "set_tid_address", "restart_syscall", "kill",
+	"pidfd_send_signal", "pidfd_open", "pidfd_getfd", "process_madvise", "process_mrelease", "kcmp",
+	"get_thread_area", "getresgid", "setresuid", "unshare", "setregid", "getresuid", "setns", "geteuid",
+	"setreuid", "getgroups", "setresgid", "setuid", "set_thread_area", "getuid", "setgid", "getgid",
 	"setgroups", "ioprio_set", "ioprio_get",
 
 	// Synchronization
 	"futex", "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "rt_sigpending", "rt_sigtimedwait",
-	"rt_sigqueueinfo", "rt_sigsuspend", "rt_tgsigqueueinfo", "sigaltstack", "pause", "tkill", "tgkill", 
-	"signalfd", "signalfd4", "semget", "semop", "mq_getsetattr","semctl", "semtimedop", "msgget", 
-	"msgsnd", "msgrcv", "msgctl", "shmget", "shmat", "shmctl", "shmdt", "mq_timedreceive","set_robust_list", 
+	"rt_sigqueueinfo", "rt_sigsuspend", "rt_tgsigqueueinfo", "sigaltstack", "pause", "tkill", "tgkill",
+	"signalfd", "signalfd4", "semget", "semop", "mq_getsetattr", "semctl", "semtimedop", "msgget",
+	"msgsnd", "msgrcv", "msgctl", "shmget", "shmat", "shmctl", "shmdt", "mq_timedreceive", "set_robust_list",
 	"get_robust_list", "futex_wake", "futex_waitv", "futex_wait", "futex_requeue", "mq_timedsend", "mq_open",
 	"mq_notify", "mq_unlink", "eventfd", "eventfd2",
 
 	// Memory
 	"mmap", "mprotect", "munmap", "mremap", "msync", "mincore", "madvise", "brk", "mlock",
-	"munlock", "mlockall", "munlockall", "mlock2", "remap_file_pages","memfd_create", "memfd_secret", 
+	"munlock", "mlockall", "munlockall", "mlock2", "remap_file_pages", "memfd_create", "memfd_secret",
 	"set_mempolicy_home_node", "pkey_mprotect", "pkey_alloc", "pkey_free", "cachestat", "map_shadow_stack",
 	"migrate_pages", "get_mempolicy", "set_mempolicy", "mbind", "move_pages", "userfaultfd",
 
 	// Metadata
-	"stat", "fstat", "lstat", "newfstatat", "statx", "getdents", "getdents64", "getcwd", "chdir", 
-	"fchdir", "rename", "renameat", "renameat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", 
-	"symlink", "symlinkat", "readlink", "readlinkat", "chmod", "fchmod", "fchmodat", "chown", "fchown", 
-	"lchown", "fchownat", "umask", "truncate", "ftruncate", "fallocate", "sync_file_range", "vmsplice", 
-	"inotify_init1", "faccessat", "openat", "move_mount", "fsopen", "fsconfig", "fsmount", 
-	"fspick", "inotify_init", "lookup_dcookie","name_to_handle_at", "open_by_handle_at", "statfs", 
-	"fstatfs", "ustat", "getxattr", "lgetxattr", "fgetxattr", "listxattr", "llistxattr", "flistxattr", 
+	"stat", "fstat", "lstat", "newfstatat", "statx", "getdents", "getdents64", "getcwd", "chdir",
+	"fchdir", "rename", "renameat", "renameat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat",
+	"symlink", "symlinkat", "readlink", "readlinkat", "chmod", "fchmod", "fchmodat", "chown", "fchown",
+	"lchown", "fchownat", "umask", "truncate", "ftruncate", "fallocate", "sync_file_range", "vmsplice",
+	"inotify_init1", "faccessat", "openat", "move_mount", "fsopen", "fsconfig", "fsmount",
+	"fspick", "inotify_init", "lookup_dcookie", "name_to_handle_at", "open_by_handle_at", "statfs",
+	"fstatfs", "ustat", "getxattr", "lgetxattr", "fgetxattr", "listxattr", "llistxattr", "flistxattr",
 	"setxattr", "lsetxattr", "fsetxattr", "removexattr", "lremovexattr", "fremovexattr", "inotify_rm_watch",
 	"open_tree", "quotactl_fd", "inotify_add_watch",
 
 	// Data
 	"read", "write", "pread64", "pwrite64", "readv", "writev", "preadv", "pwritev", "preadv2", "pwritev2",
-	"creat", "fsync","splice", "tee", "process_vm_readv", "process_vm_writev", "fchmodat2", "openat2", 
-	"faccessat2", "close_range", "copy_file_range", "fcntl", "pipe2", "flock", 
+	"creat", "fsync", "splice", "tee", "process_vm_readv", "process_vm_writev", "fchmodat2", "openat2",
+	"faccessat2", "close_range", "copy_file_range", "fcntl", "pipe2", "flock",
 	"open", "linkat", "pipe", "access", "mknod", "mknodat", "fadvise64", "readahead", "dup3", "dup", "dup2",
 	"fdatasync", "lseek", "link", "close", "ioctl", "sendfile",
 
@@ -225,14 +210,14 @@ var whitelist = []string{
 	// B — Temporarily whitelisted because denying it outright would break apps and we haven’t implemented tracer logic.
 	// C — Temporarily whitelisted because we haven’t audited whether it can cause proxy leaks.
 	// D — Not whitelisted here because we handle it elsewhere (or it’s obsolete / handled by kernel compatibility).
-	"socket", // A -> socket() only creates an endpoint and returns a file descriptor — it does not itself send network 
-	// traffic. Whitelisting it is reasonable if you still intercept the actual connect/send syscalls. See socket(2) 
+	"socket", // A -> socket() only creates an endpoint and returns a file descriptor — it does not itself send network
+	// traffic. Whitelisting it is reasonable if you still intercept the actual connect/send syscalls. See socket(2)
 	// and the socket overview (https://man7.org/linux/man-pages/man2/socket.2.html)
 
-	"socketpair", // A -> like socket(), socketpair() creates a pair of connected sockets, but does not send data 
+	"socketpair", // A -> like socket(), socketpair() creates a pair of connected sockets, but does not send data
 	// over the network. (https://man7.org/linux/man-pages/man2/socketpair.2.html)
 
-	"bind", // B -> bind() assigns a local address/port to a socket. Denying bind would break legitimate server and 
+	"bind", // B -> bind() assigns a local address/port to a socket. Denying bind would break legitimate server and
 	// client behavior (such as ephemeral-port selection) (https://man7.org/linux/man-pages/man2/bind.2.html)
 
 	"listen", // B -> listen() marks a socket as a passive socket that will be used to accept incoming connection requests.
@@ -247,31 +232,31 @@ var whitelist = []string{
 	"getpeername", // A -> getpeername() retrieves the remote address/port of a connected socket. Safe to whitelist.
 	// https://man7.org/linux/man-pages/man2/getpeername.2.html
 
-	"sendto", "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg", // C -> These perform actual data transfer and can cause leaks 
-	// depending on socket type (e.g. raw sockets). Until all usese are audited 
+	"sendto", "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg", // C -> These perform actual data transfer and can cause leaks
+	// depending on socket type (e.g. raw sockets). Until all usese are audited
 	// (connected vs unconnected sockets, UDP vs TCP, raw/AF_PACKET), mark them as temporarily whitelisted pending audit.
 
 	"shutdown", // A -> shutdown() disables sends and/or receives on a socket. Safe to whitelist.
 	// https://man7.org/linux/man-pages/man2/shutdown.2.html
 
-	"setsockopt", "getsockopt", // B -> These change or query socket behavior (timeouts, buffer sizes, socket flags). 
-	// Denying them can break apps; but they can affect how traffic gets sent 
+	"setsockopt", "getsockopt", // B -> These change or query socket behavior (timeouts, buffer sizes, socket flags).
+	// Denying them can break apps; but they can affect how traffic gets sent
 	// (e.g., SO_BINDTODEVICE, SO_MARK, IP_HDRINCL). Temporarily whitelist with a TODO to audit which specific options are risky
 
 	"socketcall", // B -> On 32-bit ABIs (e.g. i386), all socket ops are multiplexed through this syscall. (socket, connect, bind, sendmsg, etc.)
-	// Denying it would break networking entirely for 32-bit apps, so it is whitelisted for now. 
+	// Denying it would break networking entirely for 32-bit apps, so it is whitelisted for now.
 
 	// Security
-	"capget", "capset", "prctl", "arch_prctl", "seccomp", "landlock_create_ruleset", "landlock_add_rule", 
-	"keyctl","landlock_restrict_self", "setfsgid", "request_key", "add_key", "setfsuid",
+	"capget", "capset", "prctl", "arch_prctl", "seccomp", "landlock_create_ruleset", "landlock_add_rule",
+	"keyctl", "landlock_restrict_self", "setfsgid", "request_key", "add_key", "setfsuid",
 
 	// Nonblocking IO
 	"poll", "ppoll", "select", "pselect6", "epoll_create", "epoll_create1", "epoll_ctl", "epoll_ctl_old",
-	"epoll_wait", "epoll_wait_old", "epoll_pwait", "epoll_pwait2", "io_setup", "io_destroy", "io_getevents", 
+	"epoll_wait", "epoll_wait_old", "epoll_pwait", "epoll_pwait2", "io_setup", "io_destroy", "io_getevents",
 	"io_submit", "io_cancel", "io_uring_setup", "io_uring_enter", "io_uring_register", "io_pgetevents",
 
 	// unimplemented system calls
-	// "afs_syscall", "break", "fattach", "fdetach", "ftime", "getmsg", "getpmsg", "gtty", "isastream", "lock", "madvise1", 
+	// "afs_syscall", "break", "fattach", "fdetach", "ftime", "getmsg", "getpmsg", "gtty", "isastream", "lock", "madvise1",
 	// "mpx", "prof", "profil", "putmsg", "putpmsg", "security", "stty", "tuxcall", "ulimit", "vserver",
 }
 
@@ -357,7 +342,7 @@ Flags:
 
 	// Re-parse CLI flags again to ensure they override all
 	_ = K.Load(posflag.Provider(Flags, ".", K), nil)
-	
+
 	// Show version
 	if K.Bool("version") {
 		logger.Info().Msg("sockstrace v1.2")
@@ -374,7 +359,9 @@ Flags:
 	validateCLI()
 }
 
-func initSeccomp() chan <-struct{} {
+var localDNSServerSockAddr *unix.SockaddrInet4
+
+func initSeccomp() chan<- struct{} {
 	api, err := libseccomp.GetAPI()
 	if err != nil {
 		logger.Fatal().Msg("Failed to get seccomp API level")
@@ -389,7 +376,11 @@ func initSeccomp() chan <-struct{} {
 
 	logger.Info().Msgf("Seccomp filter loaded with notification FD: %v", fd)
 
-	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen, "sendmsg": HandleSendmsg, "sendmmsg": HandleSendmsg, "writev": HandleWritev}
+	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen}
+
+	if proxydns {
+		go startLocalDNSServer()
+	}
 
 	stop, errChan := Handle(fd, handlers)
 
@@ -406,8 +397,8 @@ func main() {
 	// Initialize logger
 	logger = zerolog.New(
 		zerolog.ConsoleWriter{
-			Out:        os.Stderr,           // Output to stderr
-			TimeFormat: time.RFC3339,        // Time format
+			Out:        os.Stderr,    // Output to stderr
+			TimeFormat: time.RFC3339, // Time format
 		},
 	).Level(zerolog.TraceLevel).With().Timestamp().Caller().Logger()
 
@@ -429,14 +420,13 @@ func main() {
 	proxySockaddr4 = netTCPAddrToSockAddr(*proxyFullAddr4)
 	proxySockaddr6 = netTCPAddrToSockAddr(*proxyFullAddr6)
 
-	loadAllowedAddresses(allowedAddressesMap,allowedAddresses)
-	loadAllowedAddresses(allowedTCPOriginMap,allowedTCPOrigin)
+	loadAllowedAddresses(allowedAddressesMap, allowedAddresses)
+	loadAllowedAddresses(allowedTCPOriginMap, allowedTCPOrigin)
 
 	initializeAuthData()
 
 	runProgram(Flags.Args()[0]) // Handle program execution after flags are processed
 }
-
 
 func runProgram(program string) {
 	logger.Info().Msgf("Executing program: %s", program)
@@ -473,8 +463,8 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 
 	// Define a set of syscalls that we want to block when blockIncomingTCP is true.
 	incomingTCPSyscalls := map[string]bool{
-		"bind":    true,
-		"listen":  true,
+		"bind":   true,
+		"listen": true,
 	}
 
 	// Define a set of syscalls that we want to handle.
@@ -495,19 +485,8 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			return 0, fmt.Errorf("failed to get syscall ID for %s: %w", whitelist[sc], err)
 		}
 
-		if enforceSocks5Auth && whitelist[sc] == "sendto"{
+		if enforceSocks5Auth && whitelist[sc] == "sendto" {
 			handledSyscalls["sendto"] = HandleSendto
-
-			continue
-		}
-
-		if proxydns && (whitelist[sc] == "sendmsg" || whitelist[sc] == "sendmmsg" || whitelist[sc] == "writev") {
-			switch whitelist[sc] {
-			case "sendmsg", "sendmmsg":
-				handledSyscalls[whitelist[sc]] = HandleSendmsg
-			case "writev":
-				handledSyscalls[whitelist[sc]] = HandleWritev
-			}
 
 			continue
 		}
@@ -627,11 +606,8 @@ func Handle(fd libseccomp.ScmpFd, handlers map[string]SyscallHandler) (chan<- st
 	return stop, errChan
 }
 
-
 // HandleConnect is a syscall handler for connect.
 func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
-	logger.Info().Msgf("Intercepted 'connect' syscall from PID %d", req.Pid)
-
 	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
 	if err != nil {
 		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
@@ -659,7 +635,7 @@ func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 	}()
 
 	// Log the socket protocol for the syscall
-	logSocketProtocol(localFd, int(req.Pid), "connect")
+	logSocketProtocol(localFd, int(req.Data.Args[0]), int(req.Pid), "connect")
 
 	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
 
@@ -690,12 +666,10 @@ func HandleConnect(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 	sockfd := req.Data.Args[0]
 	pid := req.Pid
 
-	return handleIPEvent(sockfd, pid, addr)
+	return handleIPEvent(localFd, sockfd, pid, addr)
 }
 
 func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
-	logger.Info().Msgf("Intercepted 'sendto' syscall from PID %d", req.Pid)
-
 	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
 	if err != nil {
 		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
@@ -723,7 +697,7 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	}()
 
 	// Log the socket protocol for the syscall
-	logSocketProtocol(localFd, int(req.Pid), "sendto")
+	logSocketProtocol(localFd, int(req.Data.Args[0]), int(req.Pid), "sendto")
 
 	fd := int(req.Data.Args[0])
 	// Check if the FD is relevant for SOCKS5 processing
@@ -749,7 +723,7 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	// Read the data from the memory at the buffer pointer
 	bufferSize := req.Data.Args[2] // Length of data
 	bufferAddr := req.Data.Args[1] // Pointer to data
-	
+
 	data := make([]byte, bufferSize)
 
 	_, err = syscall.Pread(int(mem.Fd()), data, int64(bufferAddr))
@@ -762,110 +736,6 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 		logger.Fatal().Msgf("failed to parse SOCKS5 handshake data %v", err)
 	}
 
-	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-}
-
-func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
-	logger.Info().Msgf("Intercepted 'sendmsg' syscall from PID %d", req.Pid)
-
-	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
-	if err != nil {
-		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
-	}
-
-	tgid, err := getTgid(req.Pid)
-	if err != nil {
-		logger.Fatal().Msgf("Error getting tgid: %v", err)
-	}
-
-	pfd, err := pidfd.Open(tgid, 0)
-	if err != nil {
-		logger.Fatal().Msgf("Error opening pidfd %v", err)
-	}
-
-	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
-	if err != nil {
-		logger.Fatal().Msgf("Error getting fd %v", err)
-	}
-
-	defer func() {
-		if err := unix.Close(localFd); err != nil {
-			logger.Warn().Msgf("Error closing localFd: %v", err)
-		}
-	}()
-
-	logSocketProtocol(localFd, int(req.Pid), "sendmsg")
-
-	_, port, _, err := getConnectionInfo(localFd, true)
-	if err != nil {
-		if errors.Is(err, syscall.ENOTCONN) {
-			// Connection not established yet
-			// Maybe confirm the address is not in the msghdr
-			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-		}
-
-		logger.Fatal().Msgf("Error getting connection info: %v", err)
-	}
-
-	if port == DNSPort { //nolint:nestif //TODO: Will be handled 
-		// DNS request
-		// Read the memory of the process
-		memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
-
-		mem, err := os.Open(memFile) //nolint:gosec // G304: safe usage, not user-controlled
-		if err != nil {
-			logger.Fatal().Msgf("failed to open memory file: %v", err)
-		}
-		
-		defer func() {
-		if err := mem.Close(); err != nil {
-			logger.Warn().Msgf("Error closing mem file: %v", err)
-		}}() //nolint: wsl
-
-		data := make([]byte, syscall.SizeofMsghdr)
-
-		_, err = syscall.Pread(int(mem.Fd()), data, int64(req.Data.Args[1]))
-		if err != nil {
-			logger.Fatal().Msgf("failed to read memory: %v", err)
-		}
-
-		var msg msghdr
-		if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &msg); err != nil {
-			logger.Fatal().Msgf("failed to decode msghdr: %v", err)
-		}
-	
-		// Read first iovec
-		iovBytes, err := readBytes(mem, msg.Iov, uint64(binary.Size(iovec{})))
-		if err != nil {
-			logger.Fatal().Msgf("failed to read iovec: %v", err)
-		}
-
-		var iov iovec
-		if err := binary.Read(bytes.NewReader(iovBytes), binary.LittleEndian, &iov); err != nil {
-			logger.Fatal().Msgf("failed to decode iovec: %v", err)
-		}
-	
-		// Read actual DNS bytes
-		dnsData, err := readBytes(mem, iov.Base, iov.Len)
-		if err != nil {
-			logger.Fatal().Msgf("failed to read DNS data: %v", err)
-		}
-	
-		// Parse DNS message minimally
-		var m dns.Msg
-		if err := m.Unpack(dnsData); err != nil {
-			logger.Fatal().Msgf("failed to unpack DNS message: %v", err)
-		}
-
-		if len(m.Question) == 0 {
-			logger.Info().Msgf("No DNS question found")
-		} else {
-			for _, question := range m.Question {
-				logger.Info().Msgf("DNS-over-UDP question: %s", question.Name)
-			}
-		}// TODO : Route the request through tor and send it back to the process
-	}
-	// Default behavior is to allow the connection
 	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 }
 
@@ -935,14 +805,14 @@ func HandleListen(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	if err != nil {
 		logger.Fatal().Msgf("Error getting fd %v", err)
 	}
-	
+
 	defer func() {
 		if err := unix.Close(localFd); err != nil {
 			logger.Warn().Msgf("Error closing localFd: %v", err)
 		}
 	}()
 
-	addr,_, _, err := getConnectionInfo(localFd, false)
+	addr, _, _, err := getConnectionInfo(localFd, false)
 	if err != nil {
 		logger.Fatal().Msgf("Error getting connection info: %v", err)
 	}
@@ -958,116 +828,15 @@ func HandleListen(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	return 0, 0, 0
 }
 
-func HandleWritev(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
-	logger.Info().Msgf("Intercepted 'writev' syscall from PID %d", req.Pid)
-
-	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
-	if err != nil {
-		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
-	}
-
-	tgid, err := getTgid(req.Pid)
-	if err != nil {
-		logger.Fatal().Msgf("Error getting tgid: %v", err)
-	}
-
-	pfd, err := pidfd.Open(tgid, 0)
-	if err != nil {
-		logger.Fatal().Msgf("Error opening pidfd %v", err)
-	}
-
-	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
-	if err != nil {
-		logger.Fatal().Msgf("Error getting fd %v", err)
-	}
-
-	defer func() {
-		if err := unix.Close(localFd); err != nil {
-			logger.Warn().Msgf("Error closing localFd: %v", err)
-		}
-	}()
-
-	_, port, _, err := getConnectionInfo(localFd, true)
-	if err != nil {
-		if errors.Is(err, syscall.ENOTCONN) {
-			// Connection not established yet
-			// Maybe confirm the address is not in the msghdr
-			return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-		}
-
-		logger.Fatal().Msgf("Error getting connection info: %v", err)
-	}
-
-	if port == DNSPort { //nolint:nestif //TODO: Will be handled 
-		// DNS request
-		memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
-
-		mem, err := os.Open(memFile) //nolint:gosec // G304: safe usage, not user-controlled
-		if err != nil {
-			logger.Fatal().Msgf("failed to open memory file: %v", err)
-		}
-
-		defer func() {
-			if err := mem.Close(); err != nil {
-				logger.Warn().Msgf("Error closing mem file: %v", err)
-			}
-		}()
-
-		iovCount := int(req.Data.Args[2])
-		if iovCount != 2 {
-			logger.Fatal().Msgf("Unexpected iovec count: %d, expected 2 (DNS over TCP requirements)", iovCount)
-		}
-		
-		iovecSize := binary.Size(iovec{})
-		totalSize := iovecSize * iovCount
-
-		iovecsRaw := make([]byte, totalSize)
-		// Read the iovec array from the process memory
-		_, err = syscall.Pread(int(mem.Fd()), iovecsRaw, int64(req.Data.Args[1]))
-		if err != nil {
-			logger.Fatal().Msgf("failed to read iovec array: %v", err)
-		}
-
-		// Decode into a slice of iovec
-		iovecs := make([]iovec, iovCount)
-		if err := binary.Read(bytes.NewReader(iovecsRaw), binary.LittleEndian, &iovecs); err != nil {
-			logger.Fatal().Msgf("failed to decode iovec array: %v", err)
-		}
-
-		secondIov := iovecs[1]
-		// Read the DNS data from the second iovec
-		dnsData, err := readBytes(mem, secondIov.Base, secondIov.Len)
-		if err != nil {
-			logger.Fatal().Msgf("failed to read DNS data: %v", err)
-		}
-
-		// Parse DNS message
-		var m dns.Msg
-		if err := m.Unpack(dnsData); err != nil {
-			logger.Fatal().Msgf("failed to unpack DNS message: %v", err)
-		}
-
-		if len(m.Question) == 0 {
-			logger.Warn().Msgf("No DNS question found")
-		} else {
-			for _, question := range m.Question {
-				logger.Info().Msgf("DNS-over-TCP question: %s", question.Name)
-			}
-		}
-	}// TODO : Route the request through tor and send it back to the process
-	// Default behavior is to allow the connection
-	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-}
-
-func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
+func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
 	switch {
 	case IsAddressAllowed(address, fd):
 		logger.Info().Msgf("Allowed connection to %s", address.String())
-	
+
 		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 	case logLeaks:
 		logger.Warn().Msgf("Proxy Leak detected, but allowed: %s", address.String())
-	
+
 		return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 	case coreDump:
 		logger.Info().Msgf("Dumping core for PID %d", pid)
@@ -1087,14 +856,17 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 		}
 
 		os.Exit(0)
-	default:
-		tgid, err := getTgid(pid)
-		if err != nil {
-			logger.Fatal().Msgf("Error getting tgid: %v", err)
+	case proxydns && address.Port == DNSPort:
+		logger.Info().Msgf("Redirecting DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSServerSockAddr.Port)
+
+		if err := unix.Connect(localFd, localDNSServerSockAddr); err != nil {
+			logger.Fatal().Msgf("Failed to connect redirected socket: %v", err)
 		}
 
+		return 0, 0, 0
+	default:
 		if killProg {
-			err = killProcessAndDescendants(tracee.PID)
+			err := killProcessAndDescendants(tracee.PID)
 			if err != nil {
 				logger.Fatal().Msgf("Error killing process: %v", err)
 			}
@@ -1102,25 +874,9 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 			os.Exit(0)
 		}
 
-		tgidFD, err := pidfd.Open(tgid, 0)
-		if err != nil {
-			logger.Fatal().Msgf("Error opening pidfd %v", err)
-		}
-
-		connFD, err := tgidFD.GetFd(int(fd), 0)
-		if err != nil {
-			logger.Fatal().Msgf("Error getting fd %v", err)
-		}
-
-		defer func() {
-			if err := unix.Close(connFD); err != nil {
-				logger.Warn().Msgf("Error closing connFD: %v", err)
-			}
-		}()
-
 		if allowNonTCP {
 			// Allow non-TCP connections e.g UDP connections (Tor Proxy only supports TCP)
-			opt, err := syscall.GetsockoptInt(connFD, syscall.SOL_SOCKET, syscall.SO_TYPE)
+			opt, err := syscall.GetsockoptInt(localFd, syscall.SOL_SOCKET, syscall.SO_TYPE)
 			if err != nil {
 				logger.Fatal().Msgf("[fd:%v] syscall.GetsockoptInt failed: %v", fd, err)
 			}
@@ -1143,7 +899,7 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 
 			logger.Info().Msgf("Redirecting connection from %s to %s\n", address.String(), proxyAddress)
 
-			file := os.NewFile(uintptr(connFD), "")
+			file := os.NewFile(uintptr(localFd), "")
 
 			conn, err := net.FileConn(file)
 			if err != nil {
@@ -1155,8 +911,8 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 					logger.Warn().Msgf("Error closing connection: %v", err)
 				}
 			}()
-			
-			err = unix.Connect(connFD, destinationAddr)
+
+			err = unix.Connect(localFd, destinationAddr)
 			if err != nil {
 				if errors.Is(err, unix.EINPROGRESS) {
 					logger.Info().Msgf("Connection is in progress, waiting for completion")
@@ -1164,21 +920,21 @@ func handleIPEvent(fd uint64, pid uint32, address FullAddress) (uint64, int32, u
 					logger.Fatal().Msgf("Error connecting to tor: %v", err)
 				}
 			}
-			
+
 			username, password, err := resolveCredentials()
 			if err != nil {
 				logger.Fatal().Msgf("Error resolving credentials: %v", err)
 			}
 
 			switch redirect {
-				case "socks5":
-					err = handleSocks5Proxy(address.String(), username, password, conn)
-				case "http":
-					err = handleHTTPProxy(proxyAddress, address.String(), username, password, conn)
-				default:
-					logger.Fatal().Msg("Invalid redirect option")
+			case "socks5":
+				err = handleSocks5Proxy(address.String(), username, password, conn)
+			case "http":
+				err = handleHTTPProxy(proxyAddress, address.String(), username, password, conn)
+			default:
+				logger.Fatal().Msg("Invalid redirect option")
 			}
-			
+
 			if err != nil {
 				logger.Fatal().Msgf("Error connecting to %s proxy: %v", redirect, err)
 			}
@@ -1278,7 +1034,7 @@ func (i FullAddress) String() string {
 
 func netTCPAddrToSockAddr(address FullAddress) unix.Sockaddr { //nolint:ireturn // required to return unix.Sockaddr for syscall usage
 	ip := address.IP
- 	ip4 := ip.To4()
+	ip4 := ip.To4()
 
 	if ip4 != nil {
 		return &unix.SockaddrInet4{
@@ -1516,7 +1272,7 @@ func parseSOCKS5Data(fd int, data []byte) error {
 
 	state.buffer.Write(data) // Append new data to buffer
 	buf := state.buffer.Bytes()
-	
+
 	// Process SOCKS5 handshake (first three bytes: 0x05, 0x01, 0x02)
 	if !state.handshakeCompleted {
 		// Ensure at least 3 bytes before checking handshake
@@ -1637,19 +1393,19 @@ func initializeAuthData() {
 }
 
 func loadAllowedAddresses(addressMap map[string]struct{}, addresses []string) {
-    for _, addr := range addresses {
-        addressMap[addr] = struct{}{} // Empty struct uses zero memory
-    }
+	for _, addr := range addresses {
+		addressMap[addr] = struct{}{} // Empty struct uses zero memory
+	}
 }
 
 func isWhitelistedAddress(addressMap map[string]struct{}, addr string) bool {
-    _, allowed := addressMap[addr]
+	_, allowed := addressMap[addr]
 
-    return allowed
+	return allowed
 }
 
 func killProcessAndDescendants(pid int) error {
-	if killAllTracees { 
+	if killAllTracees {
 		descendants, err := getDescendants(pid)
 		if err != nil {
 			return fmt.Errorf("error getting descendants: %w", err)
@@ -1675,7 +1431,6 @@ func killProcessAndDescendants(pid int) error {
 			}
 		}
 	}
-	
 
 	// Kill the main PID last (for KillAllTracees)
 	err := killProcessByID(pid)
@@ -1757,8 +1512,8 @@ func getChildren(pid int, tid int) ([]int, error) {
 }
 
 // getDescendants recursively finds all children of a given PID
-// It's important to check TIDs because a process may have multiple threads (TIDs), 
-// and child processes can be associated with any of these threads, not just the main thread (PID). 
+// It's important to check TIDs because a process may have multiple threads (TIDs),
+// and child processes can be associated with any of these threads, not just the main thread (PID).
 // If we only check the main PID's children, we might miss processes created by other threads.
 func getDescendants(pid int) ([]int, error) {
 	seen := make(map[int]struct{})
@@ -1833,16 +1588,16 @@ func validateSOCKS5Auth(username, password string) error {
 		usernameRest := username[len(torPrefix)+1:]
 
 		switch formatType {
-			case '0': // Format type [30]
-				if len(usernameRest) > 0 {
-					return errors.New("invalid SOCKS5 authentication: format type '0' must have an empty username field")
-				}
-			case '1': // Format type [31]
-				if len(usernameRest) == 0 {
-					return errors.New("invalid SOCKS5 authentication: format type '1' requires a non-empty RPC Object ID")
-				}
-			default:
-				return fmt.Errorf("invalid SOCKS5 authentication: unrecognized format type '%c'", formatType)
+		case '0': // Format type [30]
+			if len(usernameRest) > 0 {
+				return errors.New("invalid SOCKS5 authentication: format type '0' must have an empty username field")
+			}
+		case '1': // Format type [31]
+			if len(usernameRest) == 0 {
+				return errors.New("invalid SOCKS5 authentication: format type '1' requires a non-empty RPC Object ID")
+			}
+		default:
+			return fmt.Errorf("invalid SOCKS5 authentication: unrecognized format type '%c'", formatType)
 		}
 
 		logger.Info().Msgf(
@@ -1931,7 +1686,7 @@ func checkCoreDumpLimit() error {
 
 // getConnectionInfo retrieves the connection information for a given file descriptor (fd).
 // It returns the address, port, family, and any error encountered.
-func getConnectionInfo(socketFD int, remote bool) (string, int, string, error) { //nolint:unparam // keep port for future use
+func getConnectionInfo(socketFD int, remote bool) (string, int, string, error) {
 	var sa syscall.Sockaddr
 
 	var err error
@@ -1961,15 +1716,191 @@ func getConnectionInfo(socketFD int, remote bool) (string, int, string, error) {
 	}
 }
 
-func readBytes(mem *os.File, addr uint64, length uint64) ([]byte, error) {
-	buf := make([]byte, length)
-	// Use syscall.Pread to read bytes from the memory file descriptor
-	_, err := syscall.Pread(int(mem.Fd()), buf, int64(addr))
+func startLocalDNSServer() {
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read bytes from memory at address 0x%x: %w", addr, err)
+		logger.Fatal().Msgf("Failed to resolve local DNS server address: %v", err)
 	}
 
-	return buf, nil
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		logger.Fatal().Msgf("Failed to start local DNS server: %v", err)
+	}
+	// Do not close conn here, it runs forever
+
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		logger.Fatal().Msgf("Failed to cast local address to UDPAddr")
+	}
+
+	logger.Info().Msgf("Local DNS server listening on %s", localAddr.String())
+
+	localDNSServerSockAddr = &unix.SockaddrInet4{
+		Port: localAddr.Port,
+		Addr: [4]byte{127, 0, 0, 1},
+	}
+
+	buf := make([]byte, 4096)
+
+	for {
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			logger.Error().Msgf("Local DNS server read error: %v", err)
+
+			continue
+		}
+
+		go handleLocalDNSRequest(conn, remoteAddr, buf[:n])
+	}
+}
+
+func handleLocalDNSRequest(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
+	msg := new(dns.Msg)
+	if err := msg.Unpack(data); err != nil {
+		logger.Error().Msgf("Failed to unpack DNS message: %v", err)
+
+		return
+	}
+
+	if len(msg.Question) == 0 {
+		return
+	}
+
+	question := msg.Question[0]
+	logger.Info().Msgf("Local DNS: Resolving %s (Type: %d)", question.Name, question.Qtype)
+
+	domain := strings.TrimSuffix(question.Name, ".")
+	ip, err := resolveOverTor(domain)
+
+	resp := new(dns.Msg)
+	resp.SetReply(msg)
+	resp.RecursionAvailable = true
+	resp.Authoritative = false
+
+	if err != nil {
+		logger.Error().Msgf("Local DNS: Failed to resolve %s: %v", question.Name, err)
+		resp.SetRcode(msg, dns.RcodeServerFailure)
+	} else {
+		logger.Info().Msgf("Local DNS: Resolved %s to %s", question.Name, ip.String())
+
+		ip4 := ip.To4()
+
+		if question.Qtype == dns.TypeA && ip4 != nil {
+			rr := new(dns.A)
+			rr.Hdr = dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}
+			rr.A = ip4
+			resp.Answer = append(resp.Answer, rr)
+		} else if question.Qtype == dns.TypeAAAA && ip4 == nil {
+			rr := new(dns.AAAA)
+			rr.Hdr = dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 300}
+			rr.AAAA = ip
+			resp.Answer = append(resp.Answer, rr)
+		}
+	}
+
+	respData, err := resp.Pack()
+	if err != nil {
+		logger.Error().Msgf("Local DNS: Failed to pack response: %v", err)
+
+		return
+	}
+
+	_, err = conn.WriteToUDP(respData, remoteAddr)
+	if err != nil {
+		logger.Error().Msgf("Local DNS: Failed to write response: %v", err)
+	}
+}
+
+// resolveOverTor resolves a domain name using the Tor SOCKS5 RESOLVE command (0xF0).
+// It connects to the configured Tor proxy and performs the lookup remotely.
+func resolveOverTor(domain string) (net.IP, error) {
+	// Connect to the Tor proxy with a timeout to avoid hanging connections.
+	var d net.Dialer
+
+	conn, err := d.DialContext(context.Background(), "tcp", socksTCPv4)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to Tor proxy at %s: %w", socksTCPv4, err)
+	}
+
+	defer func() {
+		if err := conn.Close(); err != nil {
+			logger.Warn().Msgf("Failed to close connection: %v", err)
+		}
+	}()
+
+	// SOCKS5 Handshake
+	// VER=5, NMETHODS=1, METHODS=[0x00] (No Auth)
+	// TODO: Support auth if configured (though Tor usually doesn't need it for local)
+	if _, err = conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return nil, fmt.Errorf("failed to send SOCKS5 handshake: %w", err)
+	}
+
+	handshakeResp := make([]byte, 2)
+	if _, err = io.ReadFull(conn, handshakeResp); err != nil {
+		return nil, fmt.Errorf("failed to read SOCKS5 handshake response: %w", err)
+	}
+
+	if handshakeResp[0] != 0x05 || handshakeResp[1] != 0x00 {
+		return nil, fmt.Errorf("SOCKS5 handshake failed: ver=%x, method=%x", handshakeResp[0], handshakeResp[1])
+	}
+
+	// Build and send RESOLVE request.
+	// VER=5, CMD=0xF0 (RESOLVE), RSV=0, ATYP=3 (Domain), Len, Domain, Port(0)
+	if len(domain) > 255 {
+		return nil, fmt.Errorf("domain name too long: %s", domain)
+	}
+
+	req := []byte{0x05, 0xF0, 0x00, 0x03, byte(len(domain))}
+	req = append(req, []byte(domain)...)
+	req = append(req, 0x00, 0x00) // Port 0
+
+	if _, err = conn.Write(req); err != nil {
+		return nil, fmt.Errorf("failed to send RESOLVE command: %w", err)
+	}
+
+	// Read response header (VER, REP, RSV, ATYP).
+	respHeader := make([]byte, 4)
+	if _, err = io.ReadFull(conn, respHeader); err != nil {
+		return nil, fmt.Errorf("failed to read RESOLVE response header: %w", err)
+	}
+
+	if respHeader[0] != 0x05 {
+		return nil, fmt.Errorf("unexpected SOCKS5 version in response: %x", respHeader[0])
+	}
+
+	if respHeader[1] != 0x00 {
+		return nil, fmt.Errorf("tor resolve failed with error code: 0x%x", respHeader[1])
+	}
+
+	// Extract IP address based on ATYP.
+	var ip net.IP
+
+	switch respHeader[3] {
+	case 0x01: // IPv4
+		ipBuf := make([]byte, 4)
+		if _, err = io.ReadFull(conn, ipBuf); err != nil {
+			return nil, fmt.Errorf("failed to read IPv4 address: %w", err)
+		}
+
+		ip = net.IP(ipBuf)
+	case 0x04: // IPv6
+		ipBuf := make([]byte, 16)
+		if _, err = io.ReadFull(conn, ipBuf); err != nil {
+			return nil, fmt.Errorf("failed to read IPv6 address: %w", err)
+		}
+
+		ip = net.IP(ipBuf)
+	default:
+		return nil, fmt.Errorf("unsupported address type in RESOLVE response: 0x%x", respHeader[3])
+	}
+
+	// Consume the 2‑byte port field (usually zero) to keep the stream clean.
+	portBuf := make([]byte, 2)
+	if _, err = io.ReadFull(conn, portBuf); err != nil {
+		return nil, fmt.Errorf("failed to read port from RESOLVE response: %w", err)
+	}
+
+	return ip, nil
 }
 
 // getSocketType retrieves the type of socket associated with the given file descriptor (fd).
@@ -2001,16 +1932,16 @@ func getSocketType(fd int) (string, error) {
 }
 
 // logSocketProtocol logs the protocol type of a socket associated with a given file descriptor (dupFd).
-func logSocketProtocol(dupFd int, pid int, syscallName string) {
+func logSocketProtocol(dupFd int, traceeFd int, pid int, syscallName string) {
 	proto, err := getSocketType(dupFd)
 
 	switch {
 	case err == nil:
-		logger.Info().Msgf("FD %d is using protocol: %s (syscall: %s)", pid, proto, syscallName)
+		logger.Info().Msgf("Intercepted '%s' syscall from PID %d, FD %d (%s)", syscallName, pid, traceeFd, proto)
 	case errors.Is(err, unix.ENOTSOCK):
-		logger.Debug().Msgf("FD %d is not a socket, skipping (syscall: %s)", pid, syscallName)
+		logger.Debug().Msgf("PID %d, FD %d is not a socket, skipping (syscall: %s)", pid, traceeFd, syscallName)
 	default:
-		logger.Fatal().Msgf("failed to get socket type for FD %d (syscall: %s): %v", pid, syscallName, err)
+		logger.Fatal().Msgf("failed to get socket type for PID %d, FD %d (syscall: %s): %v", pid, traceeFd, syscallName, err)
 	}
 }
 
