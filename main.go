@@ -359,7 +359,8 @@ Flags:
 	validateCLI()
 }
 
-var localDNSServerSockAddr *unix.SockaddrInet4
+var localDNSAddrUDP *unix.SockaddrInet4
+var localDNSAddrTCP *unix.SockaddrInet4
 
 func initSeccomp() chan<- struct{} {
 	api, err := libseccomp.GetAPI()
@@ -379,7 +380,7 @@ func initSeccomp() chan<- struct{} {
 	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen}
 
 	if proxydns {
-		go startLocalDNSServer()
+		go startDNSServers()
 	}
 
 	stop, errChan := Handle(fd, handlers)
@@ -857,10 +858,28 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 
 		os.Exit(0)
 	case proxydns && address.Port == DNSPort:
-		logger.Info().Msgf("Redirecting DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSServerSockAddr.Port)
+		sockType, err := getSocketType(localFd)
+		if err != nil {
+			logger.Fatal().Msgf("Failed to get socket type for DNS redirection: %v", err)
+		}
 
-		if err := unix.Connect(localFd, localDNSServerSockAddr); err != nil {
-			logger.Fatal().Msgf("Failed to connect redirected socket: %v", err)
+		switch sockType {
+		case "UDP":
+			logger.Info().Msgf("Redirecting UDP DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSAddrUDP.Port)
+
+			if err := unix.Connect(localFd, localDNSAddrUDP); err != nil {
+				logger.Fatal().Msgf("Failed to connect redirected UDP socket: %v", err)
+			}
+		case "TCP":
+			logger.Info().Msgf("Redirecting TCP DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSAddrTCP.Port)
+
+			if err := unix.Connect(localFd, localDNSAddrTCP); err != nil {
+				if !errors.Is(err, unix.EINPROGRESS) {
+					logger.Fatal().Msgf("Failed to connect redirected TCP socket: %v", err)
+				}
+			}
+		default:
+			logger.Warn().Msgf("Unsupported socket type for DNS redirection: %s", sockType)
 		}
 
 		return 0, 0, 0
@@ -944,20 +963,47 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 	return 0, 0, 0
 }
 
+// IsIPAddressAllowed checks if a connection to the given address should be allowed.
+// It checks against SOCKS proxies, whitelists, loopback, and local DNS servers.
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
-	if socksTCPv4 == address.String() || socksTCPv6 == address.String() {
+	addrStr := address.String()
+
+	switch {
+	case socksTCPv4 == addrStr || socksTCPv6 == addrStr:
 		if enforceSocks5Auth {
 			socks5States[int(fd)] = &SOCKS5State{authCompleted: false}
 		}
 
 		return true
+
+	case isWhitelistedAddress(allowedAddressesMap, addrStr):
+		return true
+
+	case whitelistLoopback && address.IP.IsLoopback():
+		return true
+
+	// Allow connections to local DNS servers
+	case isLocalDNSServer(address):
+		return true
+
+	default:
+		return false
+	}
+}
+
+// isLocalDNSServer checks if the address corresponds to one of our local DNS listeners (UDP or TCP).
+func isLocalDNSServer(address FullAddress) bool {
+	// Local DNS servers are always on 127.0.0.1
+	if !address.IP.Equal(net.IPv4(127, 0, 0, 1)) {
+		return false
 	}
 
-	if isWhitelistedAddress(allowedAddressesMap, address.String()) {
+	port := int(address.Port)
+	if localDNSAddrUDP != nil && port == localDNSAddrUDP.Port {
 		return true
 	}
 
-	if whitelistLoopback && address.IP.IsLoopback() {
+	if localDNSAddrTCP != nil && port == localDNSAddrTCP.Port {
 		return true
 	}
 
@@ -1716,7 +1762,7 @@ func getConnectionInfo(socketFD int, remote bool) (string, int, string, error) {
 	}
 }
 
-func startLocalDNSServer() {
+func startDNSServers() {
 	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
 		logger.Fatal().Msgf("Failed to resolve local DNS server address: %v", err)
@@ -1735,10 +1781,47 @@ func startLocalDNSServer() {
 
 	logger.Info().Msgf("Local DNS server listening on %s", localAddr.String())
 
-	localDNSServerSockAddr = &unix.SockaddrInet4{
+	localDNSAddrUDP = &unix.SockaddrInet4{
 		Port: localAddr.Port,
 		Addr: [4]byte{127, 0, 0, 1},
 	}
+
+	// Start TCP Listener
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	if err != nil {
+		logger.Fatal().Msgf("Failed to resolve local TCP DNS server address: %v", err)
+	}
+
+	tcpListener, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		logger.Fatal().Msgf("Failed to start local TCP DNS server: %v", err)
+	}
+
+	localTCPAddr, ok := tcpListener.Addr().(*net.TCPAddr)
+	if !ok {
+		logger.Fatal().Msgf("Failed to cast local address to TCPAddr")
+	}
+
+	logger.Info().Msgf("Local DNS server listening on TCP %s", localTCPAddr.String())
+
+	localDNSAddrTCP = &unix.SockaddrInet4{
+		Port: localTCPAddr.Port,
+		Addr: [4]byte{127, 0, 0, 1},
+	}
+
+	// Handle TCP connections in a separate goroutine
+	go func() {
+		for {
+			conn, err := tcpListener.Accept()
+			if err != nil {
+				logger.Error().Msgf("Local TCP DNS server accept error: %v", err)
+
+				continue
+			}
+
+			go handleDNSRequestTCP(conn)
+		}
+	}()
 
 	buf := make([]byte, 4096)
 
@@ -1750,20 +1833,94 @@ func startLocalDNSServer() {
 			continue
 		}
 
-		go handleLocalDNSRequest(conn, remoteAddr, buf[:n])
+		go handleDNSRequestUDP(conn, remoteAddr, buf[:n])
 	}
 }
 
-func handleLocalDNSRequest(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
-	msg := new(dns.Msg)
-	if err := msg.Unpack(data); err != nil {
-		logger.Error().Msgf("Failed to unpack DNS message: %v", err)
+// handleDNSRequestTCP handles incoming TCP DNS requests.
+// It reads the RFC 1035 length prefix, processes the message, and writes the response back with the prefix.
+func handleDNSRequestTCP(conn net.Conn) {
+	defer func() {
+		if err := conn.Close(); err != nil {
+			logger.Warn().Msgf("Error closing TCP DNS connection: %v", err)
+		}
+	}()
+
+	// Read 2-byte length prefix
+	lenBuf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, lenBuf); err != nil {
+		if err != io.EOF {
+			logger.Error().Msgf("Failed to read TCP DNS length prefix: %v", err)
+		}
 
 		return
 	}
 
-	if len(msg.Question) == 0 {
+	length := binary.BigEndian.Uint16(lenBuf)
+
+	data := make([]byte, length)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		logger.Error().Msgf("Failed to read TCP DNS message body: %v", err)
+
 		return
+	}
+
+	respData, err := processDNSRequest(data)
+	if err != nil {
+		logger.Error().Msgf("Local DNS (TCP): Failed to process request: %v", err)
+
+		return
+	}
+
+	if respData == nil {
+		return
+	}
+
+	// Write 2-byte length prefix followed by response data
+	respLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(respLen, uint16(len(respData)))
+
+	if _, err := conn.Write(respLen); err != nil {
+		logger.Error().Msgf("Local DNS (TCP): Failed to write response length: %v", err)
+
+		return
+	}
+
+	if _, err := conn.Write(respData); err != nil {
+		logger.Error().Msgf("Local DNS (TCP): Failed to write response data: %v", err)
+	}
+}
+
+// handleDNSRequestUDP handles incoming UDP DNS requests.
+// It processes the message and sends the response back to the client.
+func handleDNSRequestUDP(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
+	respData, err := processDNSRequest(data)
+	if err != nil {
+		logger.Error().Msgf("Local DNS (UDP): Failed to process request: %v", err)
+
+		return
+	}
+
+	if respData == nil {
+		return
+	}
+
+	_, err = conn.WriteToUDP(respData, remoteAddr)
+	if err != nil {
+		logger.Error().Msgf("Local DNS: Failed to write response: %v", err)
+	}
+}
+
+// processDNSRequest unpacks the DNS message, resolves the query via Tor, and packs the response.
+// It returns the raw response bytes or an error.
+func processDNSRequest(data []byte) ([]byte, error) {
+	msg := new(dns.Msg)
+	if err := msg.Unpack(data); err != nil {
+		return nil, fmt.Errorf("failed to unpack DNS message: %w", err)
+	}
+
+	if len(msg.Question) == 0 {
+		return nil, nil
 	}
 
 	question := msg.Question[0]
@@ -1798,17 +1955,12 @@ func handleLocalDNSRequest(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []by
 		}
 	}
 
-	respData, err := resp.Pack()
+	packed, err := resp.Pack()
 	if err != nil {
-		logger.Error().Msgf("Local DNS: Failed to pack response: %v", err)
-
-		return
+		return nil, fmt.Errorf("failed to pack DNS response: %w", err)
 	}
 
-	_, err = conn.WriteToUDP(respData, remoteAddr)
-	if err != nil {
-		logger.Error().Msgf("Local DNS: Failed to write response: %v", err)
-	}
+	return packed, nil
 }
 
 // resolveOverTor resolves a domain name using the Tor SOCKS5 RESOLVE command (0xF0).
