@@ -380,6 +380,9 @@ func initSeccomp() chan<- struct{} {
 	handlers := map[string]SyscallHandler{"connect": HandleConnect, "sendto": HandleSendto, "bind": HandleBind, "listen": HandleListen}
 
 	if proxydns {
+		handlers["sendmsg"] = HandleSendmsg
+		handlers["sendmmsg"] = HandleSendmsg
+
 		go startDNSServers()
 	}
 
@@ -486,8 +489,8 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 			return 0, fmt.Errorf("failed to get syscall ID for %s: %w", whitelist[sc], err)
 		}
 
-		if enforceSocks5Auth && whitelist[sc] == "sendto" {
-			handledSyscalls["sendto"] = HandleSendto
+		if proxydns && (whitelist[sc] == "sendmsg" || whitelist[sc] == "sendmmsg") {
+			handledSyscalls[whitelist[sc]] = HandleSendmsg
 
 			continue
 		}
@@ -827,6 +830,119 @@ func HandleListen(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 	logger.Warn().Msgf("Blocked listen to %s", addr)
 
 	return 0, 0, 0
+}
+
+func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (uint64, int32, uint32) {
+	err := libseccomp.NotifIDValid(seccompNotifFd, req.ID)
+	if err != nil {
+		logger.Fatal().Msgf("failed to validate notification ID: %v", err)
+	}
+
+	tgid, err := getTgid(req.Pid)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting tgid: %v", err)
+	}
+
+	pfd, err := pidfd.Open(tgid, 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error opening pidfd %v", err)
+	}
+
+	// For sendmsg and sendmmsg, the FD is the first argument
+	localFd, err := pfd.GetFd(int(req.Data.Args[0]), 0)
+	if err != nil {
+		logger.Fatal().Msgf("Error getting fd %v", err)
+	}
+
+	defer func() {
+		if err := unix.Close(localFd); err != nil {
+			logger.Warn().Msgf("Error closing localFd: %v", err)
+		}
+	}()
+
+	syscallName, _ := req.Data.Syscall.GetName()
+	// Log the socket protocol for the syscall
+	logSocketProtocol(localFd, int(req.Data.Args[0]), int(req.Pid), syscallName)
+
+	memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+
+	mem, err := os.OpenFile(memFile, os.O_RDWR, 0) //nolint:gosec // G304: safe usage, not user-controlled
+	if err != nil {
+		logger.Fatal().Msgf("Failed to open tracee memory: %v", err)
+	}
+
+	defer func() {
+		if err := mem.Close(); err != nil {
+			logger.Warn().Msgf("Error closing mem file: %v", err)
+		}
+	}()
+
+	msgPtr := req.Data.Args[1]
+	count := uint64(1)
+	stride := uint64(0)
+
+	if syscallName == "sendmmsg" {
+		count = req.Data.Args[2]
+		// sizeof(struct mmsghdr) on 64-bit Linux is 64 bytes.
+		stride = 64
+	}
+
+	for i := range count {
+		currentMsgPtr := msgPtr + (i * stride)
+
+		// Read msghdr from tracee memory.
+		// Layout (x86_64): msg_name (8 bytes), msg_namelen (4 bytes).
+		// We only need these first 12 bytes to determine destination.
+		buf := make([]byte, 16)
+		if _, err := syscall.Pread(int(mem.Fd()), buf, int64(currentMsgPtr)); err != nil {
+			logger.Warn().Msgf("Failed to read msghdr for %s[%d]: %v", syscallName, i, err)
+
+			return 0, 0, 0
+		}
+
+		namePtr := binary.LittleEndian.Uint64(buf[0:8])
+		nameLen := binary.LittleEndian.Uint32(buf[8:12])
+
+		// If no address is specified, it's likely a connected socket or valid non-dest case; allow it.
+		// We use 'continue' to ensure we verify subsequent messages in the vector.
+		if namePtr == 0 || nameLen == 0 {
+			continue
+		}
+
+		addrBuf := make([]byte, nameLen)
+		if _, err := syscall.Pread(int(mem.Fd()), addrBuf, int64(namePtr)); err != nil {
+			logger.Warn().Msgf("Failed to read address for %s[%d]: %v", syscallName, i, err)
+
+			return 0, 0, 0
+		}
+
+		addr, err := ParseAddress(addrBuf)
+		if err != nil {
+			logger.Warn().Msgf("Failed to parse address for %s[%d]: %v", syscallName, i, err)
+
+			return 0, 0, 0
+		}
+
+		// Intercept DNS queries (port 53) to redirect them through the local Tor proxy.
+		if addr.Port == DNSPort && !isLocalDNSServer(addr) {
+			// TODO: Implement IPv6 support.
+			if addr.Family == unix.AF_INET6 {
+				return 0, 0, 0
+			}
+
+			if addr.Family == unix.AF_INET {
+				logger.Info().Msgf("Redirecting DNS query %s -> local DNS", addr.String())
+
+				if err := writeSockaddrInet4(mem, namePtr, localDNSAddrUDP); err != nil {
+					logger.Warn().Msgf("Failed to rewrite destination address: %v", err)
+
+					return 0, 0, 0
+				}
+			}
+		}
+	}
+
+	return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 }
 
 func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uint64, int32, uint32) {
@@ -2002,7 +2118,8 @@ func resolveOverTor(domain string) (net.IP, error) {
 		return nil, fmt.Errorf("domain name too long: %s", domain)
 	}
 
-	req := []byte{0x05, 0xF0, 0x00, 0x03, byte(len(domain))}
+	req := make([]byte, 0, 5+len(domain)+2)
+	req = append(req, 0x05, 0xF0, 0x00, 0x03, byte(len(domain)))
 	req = append(req, []byte(domain)...)
 	req = append(req, 0x00, 0x00) // Port 0
 
@@ -2160,4 +2277,19 @@ func checkBinaryInPath(name string) {
 	if _, err := exec.LookPath(name); err != nil {
 		logger.Fatal().Msgf("%s not found in $PATH", name)
 	}
+}
+
+func writeSockaddrInet4(mem *os.File, ptr uint64, addr *unix.SockaddrInet4) error {
+	// Construct a standard IPv4 socket address structure (sockaddr_in) to write back to memory.
+	// It consists of the family (AF_INET), the port (in network byte order), and the IP address.
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_INET)
+	binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port))
+	copy(buf[4:8], addr.Addr[:])
+
+	if _, err := syscall.Pwrite(int(mem.Fd()), buf, int64(ptr)); err != nil {
+		return fmt.Errorf("failed to write new address: %w", err)
+	}
+
+	return nil
 }
