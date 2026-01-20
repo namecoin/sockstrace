@@ -68,6 +68,7 @@ var (
 	killAllTracees       bool
 	coreDump             bool
 	stackTrace           bool
+	enforceUnixSocks     bool
 	proxydns             bool
 )
 
@@ -314,6 +315,7 @@ Flags:
 	// Fix: sudo sysctl -w kernel.yama.ptrace_scope=0
 	Flags.Bool("stack-trace", false, "Generate stack trace in case of proxy leak. Requires 'gdb' (default: false). On Linux with Yama, may need: sudo sysctl -w kernel.yama.ptrace_scope=0")
 	Flags.Bool("proxydns", false, "Enable DNS proxying (default: false)")
+	Flags.Bool("enforce-unix-socks", false, "Block all IPv4/IPv6 connections, enforce Unix sockets only")
 	Flags.Bool("version", false, "Show version and exit")
 	Flags.String("config", "", "Path to optional YAML config file")
 
@@ -476,6 +478,15 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 		"connect": HandleConnect,
 	}
 
+	// When enforcing Unix sockets, we need to intercept sendto/sendmsg/sendmmsg
+	if enforceUnixSocks {
+		handledSyscalls["sendto"] = HandleSendto
+		handledSyscalls["sendmsg"] = HandleSendmsg
+		handledSyscalls["sendmmsg"] = HandleSendmsg
+
+		logger.Info().Msg("Unix socket enforcement enabled - intercepting sendto/sendmsg/sendmmsg")
+	}
+
 	if len(allowedTCPOrigin) > 0 {
 		handledSyscalls["bind"] = HandleBind
 		handledSyscalls["listen"] = HandleListen
@@ -497,6 +508,11 @@ func LoadFilter() (libseccomp.ScmpFd, error) {
 
 		// Skip syscalls related to incoming TCP if blockIncomingTCP is true (default is EPERM)
 		if blockIncomingTCP && incomingTCPSyscalls[whitelist[sc]] {
+			continue
+		}
+
+		// Skip syscalls that are already being handled (e.g., sendto when enforceUnixSocks is enabled)
+		if _, handled := handledSyscalls[whitelist[sc]]; handled {
 			continue
 		}
 
@@ -702,6 +718,38 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 
 	// Log the socket protocol for the syscall
 	logSocketProtocol(localFd, int(req.Data.Args[0]), int(req.Pid), "sendto")
+
+	// Check destination address for SOCKS5 enforcement
+	// sendto args: fd, buf, len, flags, dest_addr, addrlen
+	destAddrPtr := req.Data.Args[4]
+	addrLen := req.Data.Args[5]
+
+	if enforceUnixSocks && destAddrPtr != 0 && addrLen > 0 {
+		memFile := fmt.Sprintf("/proc/%d/mem", req.Pid)
+
+		mem, err := os.Open(memFile) //nolint:gosec // G304: safe usage, not user-controlled
+		if err != nil {
+			logger.Warn().Msgf("Failed to open memory file for sendto enforcement: %v", err)
+
+			return 0, 0, 0 // Block on failure
+		}
+
+		addrData := make([]byte, addrLen)
+		_, err = syscall.Pread(int(mem.Fd()), addrData, int64(destAddrPtr))
+		_ = mem.Close()
+
+		if err == nil {
+			addr, parseErr := ParseAddress(addrData)
+			if parseErr == nil {
+				// Block ALL IPv4/IPv6 destinations
+				if addr.Family == unix.AF_INET || addr.Family == unix.AF_INET6 {
+					logger.Warn().Msgf("sendto blocked (Unix socket enforcement): %s", addr.String())
+
+					return 0, 0, 0
+				}
+			}
+		}
+	}
 
 	fd := int(req.Data.Args[0])
 	// Check if the FD is relevant for SOCKS5 processing
@@ -923,6 +971,15 @@ func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 			return 0, 0, 0
 		}
 
+		// Block ALL IPv4/IPv6 destinations
+		if enforceUnixSocks {
+			if addr.Family == unix.AF_INET || addr.Family == unix.AF_INET6 {
+				logger.Warn().Msgf("%s blocked (Unix socket enforcement): %s", syscallName, addr.String())
+
+				return 0, 0, 0
+			}
+		}
+
 		// Intercept DNS queries (port 53) to redirect them through the local Tor proxy.
 		if addr.Port == DNSPort && !isLocalDNSServer(addr) {
 			// TODO: Implement IPv6 support.
@@ -974,31 +1031,7 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 
 		os.Exit(0)
 	case proxydns && address.Port == DNSPort:
-		sockType, err := getSocketType(localFd)
-		if err != nil {
-			logger.Fatal().Msgf("Failed to get socket type for DNS redirection: %v", err)
-		}
-
-		switch sockType {
-		case "UDP":
-			logger.Info().Msgf("Redirecting UDP DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSAddrUDP.Port)
-
-			if err := unix.Connect(localFd, localDNSAddrUDP); err != nil {
-				logger.Fatal().Msgf("Failed to connect redirected UDP socket: %v", err)
-			}
-		case "TCP":
-			logger.Info().Msgf("Redirecting TCP DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSAddrTCP.Port)
-
-			if err := unix.Connect(localFd, localDNSAddrTCP); err != nil {
-				if !errors.Is(err, unix.EINPROGRESS) {
-					logger.Fatal().Msgf("Failed to connect redirected TCP socket: %v", err)
-				}
-			}
-		default:
-			logger.Warn().Msgf("Unsupported socket type for DNS redirection: %s", sockType)
-		}
-
-		return 0, 0, 0
+		return handleDNSRedirect(localFd, pid, address)
 	default:
 		if killProg {
 			err := killProcessAndDescendants(tracee.PID)
@@ -1009,8 +1042,9 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 			os.Exit(0)
 		}
 
-		if allowNonTCP {
+		if allowNonTCP && !enforceUnixSocks {
 			// Allow non-TCP connections e.g UDP connections (Tor Proxy only supports TCP)
+			// Skip this bypass when enforceUnixSocks is enabled - block ALL IPv4/IPv6
 			opt, err := syscall.GetsockoptInt(localFd, syscall.SOL_SOCKET, syscall.SO_TYPE)
 			if err != nil {
 				logger.Fatal().Msgf("[fd:%v] syscall.GetsockoptInt failed: %v", fd, err)
@@ -1021,6 +1055,14 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 				// Allow non-TCP connections
 				return 0, 0, unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 			}
+		}
+
+		// When enforceUnixSocks is enabled, block IPv4/IPv6 connections
+		// TODO: Add option to redirect connections to a Unix socket SOCKS5 proxy (e.g., --socks-unix /run/tor/socks)
+		if enforceUnixSocks {
+			logger.Warn().Msgf("Connection blocked (Unix socket enforcement): %s", address.String())
+
+			return 0, 0, 0
 		}
 
 		if redirect != "" {
@@ -1079,10 +1121,46 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 	return 0, 0, 0
 }
 
+// handleDNSRedirect handles DNS query redirection through local DNS server.
+func handleDNSRedirect(localFd int, pid uint32, address FullAddress) (uint64, int32, uint32) {
+	sockType, err := getSocketType(localFd)
+	if err != nil {
+		logger.Fatal().Msgf("Failed to get socket type for DNS redirection: %v", err)
+	}
+
+	switch sockType {
+	case "UDP":
+		logger.Info().Msgf("Redirecting UDP DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSAddrUDP.Port)
+
+		if err := unix.Connect(localFd, localDNSAddrUDP); err != nil {
+			logger.Fatal().Msgf("Failed to connect redirected UDP socket: %v", err)
+		}
+	case "TCP":
+		logger.Info().Msgf("Redirecting TCP DNS question for %s (PID %d) through Tor Resolve via Local DNS Server (127.0.0.1:%d)", address.String(), pid, localDNSAddrTCP.Port)
+
+		if err := unix.Connect(localFd, localDNSAddrTCP); err != nil {
+			if !errors.Is(err, unix.EINPROGRESS) {
+				logger.Fatal().Msgf("Failed to connect redirected TCP socket: %v", err)
+			}
+		}
+	default:
+		logger.Warn().Msgf("Unsupported socket type for DNS redirection: %s", sockType)
+	}
+
+	return 0, 0, 0
+}
+
 // IsIPAddressAllowed checks if a connection to the given address should be allowed.
 // It checks against SOCKS proxies, whitelists, loopback, and local DNS servers.
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
 	addrStr := address.String()
+
+	// If Unix socket enforcement is enabled, block ALL IPv4/IPv6 connections
+	if enforceUnixSocks {
+		logger.Warn().Msgf("IPv4/IPv6 connection rejected (Unix socket enforcement): %s", addrStr)
+
+		return false
+	}
 
 	switch {
 	case socksTCPv4 == addrStr || socksTCPv6 == addrStr:
@@ -1129,6 +1207,7 @@ func isLocalDNSServer(address FullAddress) bool {
 func IsAddressAllowed(address FullAddress, fd uint64) bool {
 	switch address.Family {
 	case unix.AF_UNIX:
+		// Unix sockets are always allowed
 		return true
 	case unix.AF_INET:
 		return IsIPAddressAllowed(address, fd)
@@ -2237,6 +2316,7 @@ func bindConfigVars() {
 	allowNonTCP = K.Bool("allow-non-tcp")
 	blockIncomingTCP = K.Bool("block-incoming-tcp")
 	proxydns = K.Bool("proxydns")
+	enforceUnixSocks = K.Bool("enforce-unix-socks")
 }
 
 func validateCLI() {
