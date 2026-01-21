@@ -1,5 +1,11 @@
+<!--
+SPDX-FileCopyrightText: 2025 The Namecoin Project <www.namecoin.org>
+
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+
 # SocksTrace
-A Golang-based proxy leak detector. Outreachy project.
+A Golang-based proxy leak detector.
 
 ## Building
 Prerequisites:
