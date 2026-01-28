@@ -739,11 +739,10 @@ func HandleSendto(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq
 		_ = mem.Close()
 
 		if err == nil {
-			addr, parseErr := ParseAddress(addrData)
-			if parseErr == nil {
-				// Block ALL IPv4/IPv6 destinations
-				if addr.Family == unix.AF_INET || addr.Family == unix.AF_INET6 {
-					logger.Warn().Msgf("sendto blocked (Unix socket enforcement): %s", addr.String())
+			if addr, parseErr := ParseAddress(addrData); parseErr == nil {
+				// Only allow AF_UNIX sockets
+				if addr.Family != unix.AF_UNIX {
+					logger.Warn().Msgf("sendto blocked (only Unix sockets allowed): %s", addr.String())
 
 					return 0, 0, 0
 				}
@@ -971,10 +970,10 @@ func HandleSendmsg(seccompNotifFd libseccomp.ScmpFd, req *libseccomp.ScmpNotifRe
 			return 0, 0, 0
 		}
 
-		// Block ALL IPv4/IPv6 destinations
+		// Only allow AF_UNIX sockets
 		if enforceUnixSocks {
-			if addr.Family == unix.AF_INET || addr.Family == unix.AF_INET6 {
-				logger.Warn().Msgf("%s blocked (Unix socket enforcement): %s", syscallName, addr.String())
+			if addr.Family != unix.AF_UNIX {
+				logger.Warn().Msgf("%s blocked (only Unix sockets allowed): %s", syscallName, addr.String())
 
 				return 0, 0, 0
 			}
@@ -1044,7 +1043,7 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 
 		if allowNonTCP && !enforceUnixSocks {
 			// Allow non-TCP connections e.g UDP connections (Tor Proxy only supports TCP)
-			// Skip this bypass when enforceUnixSocks is enabled - block ALL IPv4/IPv6
+			// Skip this bypass when enforceUnixSocks is enabled - only Unix sockets allowed
 			opt, err := syscall.GetsockoptInt(localFd, syscall.SOL_SOCKET, syscall.SO_TYPE)
 			if err != nil {
 				logger.Fatal().Msgf("[fd:%v] syscall.GetsockoptInt failed: %v", fd, err)
@@ -1057,10 +1056,10 @@ func handleIPEvent(localFd int, fd uint64, pid uint32, address FullAddress) (uin
 			}
 		}
 
-		// When enforceUnixSocks is enabled, block IPv4/IPv6 connections
+		// When enforceUnixSocks is enabled, only Unix sockets are allowed
 		// TODO: Add option to redirect connections to a Unix socket SOCKS5 proxy (e.g., --socks-unix /run/tor/socks)
 		if enforceUnixSocks {
-			logger.Warn().Msgf("Connection blocked (Unix socket enforcement): %s", address.String())
+			logger.Warn().Msgf("Connection blocked (only Unix sockets allowed): %s", address.String())
 
 			return 0, 0, 0
 		}
@@ -1155,9 +1154,9 @@ func handleDNSRedirect(localFd int, pid uint32, address FullAddress) (uint64, in
 func IsIPAddressAllowed(address FullAddress, fd uint64) bool {
 	addrStr := address.String()
 
-	// If Unix socket enforcement is enabled, block ALL IPv4/IPv6 connections
+	// If Unix socket enforcement is enabled, only Unix sockets are allowed
 	if enforceUnixSocks {
-		logger.Warn().Msgf("IPv4/IPv6 connection rejected (Unix socket enforcement): %s", addrStr)
+		logger.Warn().Msgf("Connection rejected (only Unix sockets allowed): %s", addrStr)
 
 		return false
 	}
